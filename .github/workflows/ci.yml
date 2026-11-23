@@ -2,6 +2,8 @@ name: ci
 on:
   push:
   pull_request:
+  # release.yml runs these same tests before it publishes.
+  workflow_call:
 permissions:
   contents: read
 jobs:
@@ -11,11 +13,11 @@ jobs:
       matrix:
         node: [18, 20, 22]
     steps:
-      # TODO before launch: pin both actions to full commit SHAs (Scorecard "Pinned-Dependencies").
-      - uses: actions/checkout@v4
+      # Actions are pinned to full commit SHAs; Dependabot keeps them current.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
       - name: Tests (includes the static no-network check)
