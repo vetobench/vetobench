@@ -1,0 +1,68 @@
+# Publishes vetobench to npm when a v* tag is pushed (for example v0.1.0).
+#
+# Authentication is npm trusted publishing: the publish job's OIDC token is
+# exchanged for a short-lived publish token, so no NPM_TOKEN secret exists.
+# --provenance attaches a signed statement linking the package to this
+# workflow run and the tagged commit.
+#
+# Needs, before the first release (launch day):
+#   1. The repository is public. npm refuses --provenance from a private one.
+#   2. "private": true is removed from package.json. Until then npm publish
+#      stops with EPRIVATE, so an early tag cannot release anything.
+#   3. A trusted publisher is configured for the vetobench package on
+#      npmjs.com (package Settings > Trusted publishing): GitHub Actions,
+#      organization vetobench, repository vetobench, workflow release.yml,
+#      environment npm, with "npm publish" allowed. A new configuration
+#      expires if it has no successful publish within 2 days, so add it on
+#      launch day or the day before.
+name: release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+# No job here needs the Actions cache; a poisoned cache could reach the
+# publish job's OIDC token.
+cache-mode: none
+jobs:
+  test:
+    # The same tests as ci.yml, including the run with networking switched off.
+    uses: ./.github/workflows/ci.yml
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    # Must match the environment in the npm trusted publisher configuration.
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # OIDC token for trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Node 24 bundles an npm with trusted publishing (11.5.1 or later).
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Check npm supports trusted publishing
+        run: |
+          v="$(npm --version)"
+          echo "npm $v"
+          if ! printf '%s\n%s\n' 11.5.1 "$v" | sort -V -C; then
+            echo "::error::npm $v is older than 11.5.1 and cannot use trusted publishing"
+            exit 1
+          fi
+      - name: Check the tag matches package.json
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          want="v$(node -p 'require("./package.json").version')"
+          if [ "$TAG" != "$want" ]; then
+            echo "::error::tag $TAG does not match the package.json version ($want)"
+            exit 1
+          fi
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public

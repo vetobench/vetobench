@@ -1,0 +1,48 @@
+# OpenSSF Scorecard: supply-chain checks on this repository. Results go to
+# code scanning (Security tab) and to api.scorecard.dev, which serves the badge.
+# Both need a public repository (a private one needs GitHub Advanced Security),
+# so this workflow only works fully once the repository is public.
+#
+# With publish_results: true, the Scorecard API rejects results from a workflow
+# that breaks its rules: no top-level env or defaults, no workflow-level write
+# permissions, and the analysis job may use only checkout, upload-artifact,
+# codeql-action/upload-sarif, scorecard-action and harden-runner (no run steps).
+# See https://github.com/ossf/scorecard-action#workflow-restrictions
+name: scorecard
+on:
+  # For the Branch-Protection check (default branch only).
+  branch_protection_rule:
+  # Keeps the Maintained check current.
+  schedule:
+    - cron: '27 4 * * 1'
+  push:
+    branches: [main]
+permissions:
+  contents: read
+# No job here needs the Actions cache.
+cache-mode: none
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    # Scorecard only supports the default branch.
+    if: github.event.repository.default_branch == github.ref_name
+    permissions:
+      contents: read # check out the repository while it is still private
+      security-events: write # upload SARIF to code scanning
+      id-token: write # sign the results published to api.scorecard.dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: results.sarif
