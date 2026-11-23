@@ -48,6 +48,16 @@ Choices that can only lower the count:
 
 A known source of over-counting: plain prefixes are wider than Claude Code's `:*` and ` *` rules, which match at a word boundary (`sh:*` does not approve `shasum`). `--json` also reports `wildcard.wordBoundary`, the same count with the word boundary applied. The two can differ in either direction (`npm run test:*` covers `npm run test:unit` only as a plain prefix), and the gap shows how much the number depends on this choice.
 
+## Secrets left in transcripts (`--secrets`)
+
+With `--secrets`, vetobench also counts secret-shaped strings in every transcript line: prompts, messages, tool inputs and tool results. API-request records are skipped. The scan is off by default: it runs every pattern over every line, which takes longer than the rest of the card combined.
+
+- **Categories** are fixed in code (`SECRET_PATTERNS` in `src/analyze.js`): Postgres URL with a password, other database URL with a password (MySQL, Redis, MongoDB, AMQP), `PGPASSWORD=` values, private-key blocks, provider keys by prefix (Anthropic, OpenAI-style `sk-`, GitHub, AWS, Slack, Stripe), JWTs, and other `*_SECRET` / `*_TOKEN` / `*_PASSWORD` / `*_API_KEY` assignments. The settings audit uses the same table for its "with a secret inline" count.
+- **One string counts once.** Where shapes overlap, the earlier category wins, so the key in `OPENAI_API_KEY=sk-…` counts as an OpenAI-style key and not also as an assignment.
+- **Unit: occurrences**, as in the research scan behind the claims ledger: every match in the raw JSONL line counts. The same value counts each time it is written, and Claude Code often stores a tool's output twice in one record, so occurrences overstate how many secrets there are. The card therefore also reports **distinct values**: distinct matched strings, counted through SHA-256 digests that stay in memory during the run and are then dropped. Values and digests are never printed or written.
+- **Window:** `--since` / `--until` apply to each record's timestamp. Records without one (session summaries) drop out once `--since` is set.
+- **Shapes, not verified secrets.** Placeholders and documented example keys count. Secrets in other formats (lowercase names, `password:` in YAML) are missed. This is a heuristic, not a security scan.
+
 ## Known limits
 
 - **Approvals given in chat** ("go ahead", "post it") are invisible to this field and not counted.
