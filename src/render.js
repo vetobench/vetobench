@@ -78,7 +78,7 @@ export function renderMarkdown(t, rules = {}, { version } = {}) {
     out.push('', `**Allow-rules now:** ${num(rules.allow)} allow · ${num(rules.deny)} deny · ${num(rules.ask)} ask · ` +
       `${num(rules.wildcard)} wildcard interpreter/remote rule(s) · ${num(rules.secret)} with a secret inline`)
   }
-  if (t.wildcard && typeof t.wildcard === 'object') {
+  if (t.wildcard && typeof t.wildcard === 'object' && t.wildcard.actions > 0) { // totals always carry it; hide a zero
     const fam = tally(t.wildcard.byFamily)
     out.push('', `**Wildcard reliance:** ${num(t.wildcard.actions)} static-approved shell action(s) relied on a wildcard ` +
       `interpreter/remote rule${fam.length ? ` (${list(fam)})` : ''}`)

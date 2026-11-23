@@ -5,14 +5,17 @@ import { join } from 'node:path'
 import { existsSync, writeFileSync } from 'node:fs'
 import { GATES, SHAPES, scanAll, auditSettings } from '../src/analyze.js'
 import { renderMarkdown, renderShare, renderSvg } from '../src/render.js'
+import { loadAllowRules, attributeCommand } from '../src/attribution.js'
 
 const VERSION = '0.0.1'
 const HELP = `vetobench ${VERSION}: who approved your coding agent's actions?
 
-Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--json]
+Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--rules settings.json]... [--json]
 
   transcripts-dir   default: ~/.claude/projects
   --since / --until window by UTC day (until is exclusive)
+  --rules FILE      match approvals against this settings file's allow-rules instead of your current ones
+                    (repeatable; use the settings that were in effect for the window)
   --json            aggregates as JSON (safe to share: counts only)
   --md              the card as markdown, to paste into an issue or a post
   --share           the markdown card, then a link to a prefilled GitHub issue (you open it)
@@ -21,7 +24,7 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
 function parseArgs(argv) {
-  const o = { dir: join(homedir(), '.claude', 'projects'), since: null, until: null, json: false }
+  const o = { dir: join(homedir(), '.claude', 'projects'), since: null, until: null, rules: [], json: false }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--json') o.json = true
@@ -31,6 +34,10 @@ function parseArgs(argv) {
     else if (a === '--share') o.share = true
     else if (a === '--svg') o.svg = argv[++i] ?? ''
     else if (a === '--force') o.force = true
+    else if (a === '--rules') {
+      if (!argv[i + 1]) throw new Error('--rules needs a settings file')
+      o.rules.push(argv[++i])
+    }
     else if (a === '-h' || a === '--help') o.help = true
     else if (a === '--version') o.version = true
     else if (!a.startsWith('-')) o.dir = a
@@ -46,6 +53,14 @@ function parseArgs(argv) {
 
 const pct = (n, d) => (d ? ((n / d) * 100).toFixed(n / d < 0.001 && n > 0 ? 3 : 1) + '%' : '-')
 const num = (n) => n.toLocaleString('en-US')
+
+/** "python3 12 · ssh 3 · +2 more": the largest families first. Keys are fixed names from BROAD, never commands. */
+function familyList(byFamily, top = 5) {
+  const f = Object.entries(byFamily).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+  const shown = f.slice(0, top).map(([k, n]) => `${k} ${num(n)}`)
+  if (f.length > top) shown.push(`+${f.length - top} more`)
+  return shown.join(' · ')
+}
 
 function render(t, rules) {
   const d = t.withDecision
@@ -67,6 +82,11 @@ function render(t, rules) {
   lines.push('')
   lines.push(`Static rules approved ${pct(staticTotal, d)}, the AI classifier ${pct(g('classifier'), d)}, you ${num(g('human'))} action(s).`)
   if (g('answer')) lines.push(`(${num(g('answer'))} answers to the agent's own questions are not counted as approvals.)`)
+  const wc = t.wildcard
+  if (wc.actions) {
+    lines.push(`At least ${num(wc.actions)} static-approved shell action${wc.actions === 1 ? '' : 's'} relied on a wildcard ` +
+      `interpreter or remote rule (${familyList(wc.byFamily)}).`)
+  }
   const shapes = SHAPES.filter(([k]) => t.byShape[k].withDecision)
   if (shapes.length > 1) {
     lines.push('')
@@ -108,18 +128,23 @@ async function main() {
   if (o.version) return console.log(VERSION)
   if (!existsSync(o.dir)) throw new Error(`no transcripts directory at ${o.dir}`)
   if (o.svg && !o.force && existsSync(o.svg)) throw new Error(SVG_EXISTS) // fail before a long scan
-  const totals = await scanAll(o.dir, { since: o.since, until: o.until })
-  const rules = auditSettings([
+  const settings = [
     join(homedir(), '.claude', 'settings.json'),
     join(process.cwd(), '.claude', 'settings.json'),
     join(process.cwd(), '.claude', 'settings.local.json'),
-  ])
+  ]
+  // The path is not echoed: settings file names can carry project names.
+  const allow = loadAllowRules(o.rules.length ? o.rules : settings.filter((p) => existsSync(p)))
+  if (o.rules.length && allow.unreadable) throw new Error(`--rules: ${allow.unreadable} of ${o.rules.length} file(s) could not be read as JSON`)
+  const totals = await scanAll(o.dir, { since: o.since, until: o.until, attribute: (c) => attributeCommand(c, allow.rules) })
+  const rules = auditSettings(settings)
   if (o.svg) writeSvg(o.svg, renderSvg(totals, { version: VERSION }), o.force)
   if (o.md) return console.log(renderMarkdown(totals, rules, { version: VERSION }))
   if (o.share) return console.log(renderShare(totals, rules, { version: VERSION }))
   if (o.json) {
     const { files, toolResults, withDecision, gates, humanByTool, firstTs, lastTs, byShape, shapeFiles } = totals
-    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules }, null, 2))
+    const wildcard = { ...totals.wildcard, rules: allow.rules.length }
+    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules, wildcard }, null, 2))
   }
   console.log(render(totals, rules))
 }
