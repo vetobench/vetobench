@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="32" height="32" role="img" aria-labelledby="title">
+  <title id="title">vetobench</title>
+  <rect width="100" height="100" rx="22" fill="#141416"/>
+  <path transform="translate(-130 20) scale(0.857)" fill="#FF5A1F" d="M188 0H201L220 42.9V0H232V70H219L200 27.1V70H188Z"/>
+</svg>

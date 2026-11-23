@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 444 100" width="444" height="100" role="img" aria-labelledby="title">
+  <title id="title">vetobench</title>
+  <rect width="100" height="100" rx="22" fill="#141416"/>
+  <g transform="translate(10.23 39.93) scale(0.265)">
+    <g fill="#8E8E94">
+      <path d="M18 -8H44V4H30V76H44V88H18Z"/>
+      <path d="M67.5 20H80.5L95.5 64H82.5Z"/>
+      <path d="M99.5 20H112.5L85.5 90H72.5Z"/>
+      <path d="M157.5 -6H170.5L142.5 86H129.5Z"/>
+      <path d="M256 -8H282V88H256V76H270V4H256Z"/>
+    </g>
+    <path fill="#FF5A1F" d="M188 0H201L220 42.9V0H232V70H219L200 27.1V70H188Z"/>
+  </g>
+  <g transform="translate(121.8 29) scale(0.6)">
+    <path fill="#141416" d="M7 20H20L30 50.3L40 20H53L36.5 70H23.5Z"/>
+    <g fill="none" stroke="#141416" stroke-width="12" stroke-linejoin="round">
+      <path transform="translate(60 0)" d="M12 45H48A18 19 0 1 0 41.6 59.6"/>
+      <path transform="translate(120 0)" d="M26 6V52A12 12 0 0 0 38 64H50M10 26H48"/>
+      <ellipse cx="210" cy="45" rx="18" ry="19"/>
+      <path d="M254 0V70"/>
+      <ellipse cx="271" cy="45" rx="17" ry="19"/>
+      <path transform="translate(300 0)" d="M12 45H48A18 19 0 1 0 41.6 59.6"/>
+      <path transform="translate(360 0)" d="M14 20V70M14 42A16 16 0 0 1 46 42V70"/>
+      <path transform="translate(420 0)" d="M44 32.8A17 19 0 1 0 44 57.2"/>
+      <path transform="translate(480 0)" d="M14 0V70M14 42A16 16 0 0 1 46 42V70"/>
+    </g>
+  </g>
+</svg>

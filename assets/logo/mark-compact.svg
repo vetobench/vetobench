@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="128" height="128" role="img" aria-labelledby="title">
+  <title id="title">vetobench</title>
+  <rect width="100" height="100" rx="22" fill="#141416"/>
+  <g transform="translate(-9.9 34.4) scale(0.4)">
+    <g fill="#8E8E94">
+      <path d="M67.5 20H80.5L95.5 64H82.5Z"/>
+      <path d="M99.5 20H112.5L85.5 90H72.5Z"/>
+      <path d="M157.5 -6H170.5L142.5 86H129.5Z"/>
+    </g>
+    <path fill="#FF5A1F" d="M188 0H201L220 42.9V0H232V70H219L200 27.1V70H188Z"/>
+  </g>
+</svg>

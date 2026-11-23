@@ -1,4 +1,9 @@
-# vetobench
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/lockup-dark.svg">
+    <img alt="vetobench" src="assets/logo/lockup-light.svg" width="360">
+  </picture>
+</h1>
 
 **Who approved your coding agent's actions?**
 
