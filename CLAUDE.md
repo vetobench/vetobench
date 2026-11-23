@@ -31,6 +31,7 @@ Open source (Apache-2.0), no paid product. Built in public on X and LinkedIn.
 
 ## Context
 
+- **Start every session by reading `~/Projects/agentguard-research/HANDOFF-vetobench.md`.** It holds the decisions, validated numbers, plan and gotchas from the research phase.
 - Research, decisions, plan and drafts: `~/Projects/agentguard-research/` (README "Execution plan v3", DECISIONS.md, content/drafts/).
 - Launch: Sunday 2026-12-13 at about 16:00 CET. Cross-guard numbers: Tuesday 2027-01-05, after the 14-day notice.
 - Before launch: pin GitHub Actions to commit SHAs, turn on the OpenSSF Scorecard action, and publish to npm with provenance (`npm publish --provenance`). Remove `"private": true` from `package.json` only on launch day.
