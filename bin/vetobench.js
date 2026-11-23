@@ -7,6 +7,7 @@ import { GATES, SHAPES, scanAll, auditSettings } from '../src/analyze.js'
 import { renderMarkdown, renderShare, renderSvg } from '../src/render.js'
 import { loadAllowRules, attributeCommand } from '../src/attribution.js'
 import { SECRET_CATEGORIES, scanSecrets } from '../src/secrets.js'
+import { replayCommand } from '../src/replay.js'
 
 const VERSION = '0.0.1'
 const HELP = `vetobench ${VERSION}: who approved your coding agent's actions?
@@ -22,6 +23,8 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
   --share           the markdown card, then a link to a prefilled GitHub issue (you open it)
   --svg FILE        also write the card as a 1200x630 SVG image; --force replaces FILE
   --secrets         also count passwords, keys and tokens left in the transcripts (reads every line: slower)
+
+  replay            how often "ask before production writes" would have asked (vetobench replay --help)
 
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
@@ -141,6 +144,9 @@ function writeSvg(file, svg, force) {
 }
 
 async function main() {
+  if (process.argv[2] === 'replay') {
+    return console.log(await replayCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects') }))
+  }
   const o = parseArgs(process.argv.slice(2))
   if (o.help) return console.log(HELP)
   if (o.version) return console.log(VERSION)

@@ -64,3 +64,74 @@ With `--secrets`, vetobench also counts secret-shaped strings in every transcrip
 - The field is undocumented and may change without notice. One open issue reports `user_temporary` logged without a visible prompt; check it on your own corpus before quoting the human count.
 - Rule attribution (which allow-rule approved a command) is reconstructed, not recorded (see Wildcard attribution). By default it uses your *current* settings. For an older window, pass the settings that were in effect with `--rules`.
 - This is one harness. Other agents record approvals differently or not at all.
+
+## Replay (`vetobench replay`)
+
+`vetobench replay` asks: how often would a policy that asks before production writes, CI triggers and pushes to main have stopped your agent? Unlike the card, it reads the command text of each `Bash` tool call. It matches the text in memory and prints counts per category; it never prints or stores a command, a host or a rule.
+
+- **Input.** Every `Bash` tool call (`tool_use` block) in the transcripts. A tool call id that appears in more than one file (resumed sessions copy their history) is counted once; `--json` reports the repeats under `repeated`. API-request records are skipped. `--since` / `--until` select by the UTC day of the tool call.
+- **Parsing.** The command is split into simple commands, quote-aware: `;`, `&&`, `||`, `|` and newlines end one; `$( )`, backticks, `bash -c`, `eval`, ssh remote commands, and heredocs fed to ssh, a shell or a SQL client are parsed too. Quoted text, comments, and heredoc bodies written to files are data, not commands. `VAR=value`, `export` and wrappers such as `sudo`, `env`, `timeout` and `xargs` are followed.
+- **Counting.** A command that matches several categories is one ask. The share is asks over shell commands scanned.
+
+| Category | Asks for |
+|---|---|
+| `push-to-main` | `git push` whose refspec targets a protected branch (`main`, `master`; set `branches`), including deletes |
+| `pr-merge` | `gh pr merge`, or the pull-request merge API |
+| `ci-trigger` | `gh workflow run`, `gh run rerun`, `gh release create`, `glab ci run/retry/trigger`, and workflow-dispatch, repository-dispatch or rerun API calls (`gh api`, curl) |
+| `repo-secret` | `gh secret set/delete`, `gh variable set/delete`, `glab variable set/update/delete` |
+| `package-publish` | `publish` with npm, pnpm, yarn, bun, cargo, poetry or uv; `twine upload`; `gem push`. Not with `--dry-run` |
+| `prod-host-write` | Over ssh (or `gcloud compute ssh`), on a production host: sudo file changes (tee, mv, cp, install, rm, dd, truncate, chmod, chown, ln, `sed -i`), `rm` with flags, service changes (systemctl, service, pm2), container changes (docker or podman run, restart, rm, stop, `compose up`, …), writes into `.env` or `/etc/`, reboots, and anything run with `--apply`. Reads, `mkdir` and unpacking are left to your other gates |
+| `copy-to-remote` | scp or rsync whose destination is `host:path` on a production host. Downloads are not asked |
+| `remote-sql-write` | psql, mysql or mariadb with a write (UPDATE … SET, DELETE FROM, INSERT INTO, TRUNCATE, ALTER/DROP/CREATE TABLE and similar, GRANT, REVOKE) in its arguments or heredoc, and `pg_restore` or `dropdb`, against a production host. The host comes from `-h`/`--host`, a connection URL, `host=` or `PGHOST`/`MYSQL_HOST`. Over ssh, localhost means the remote host |
+| `k8s-write` | kubectl or oc apply, create, delete, patch, replace, edit, scale, set, label, annotate, drain, cordon, `rollout restart/undo`, …; helm install, upgrade, uninstall, rollback; against a non-local `--context` (`--kube-context` for helm). Not with `--dry-run` |
+| `infra-apply` | terraform, tofu or terragrunt apply, destroy, import, taint, `state rm/mv/push`; pulumi up, destroy, import; cdk deploy, destroy |
+| `cloud-mutation` | gcloud create, update, delete, deploy, IAM changes and similar; aws mutating operations (`create-*`, `delete-*`, `put-*`, `terminate-*`, …) and bucket writes; gsutil bucket writes; az create, delete, update, set, deploy and similar |
+| `prod-api-write` | curl, wget, httpie or xh with POST, PUT, PATCH or DELETE, or a request body, to a host in `prodHosts`. Off unless your policy lists production hosts |
+| `custom` | Your policy's own `rules` that name no other category |
+
+**Which hosts are production.** A host or Kubernetes context matching `prodHosts` is production. Otherwise loopback names and addresses, `host.docker.internal`, unix sockets, local cluster contexts (`kind-*`, `k3d-*`, `minikube`, `docker-desktop`, `rancher-desktop`, `orbstack`, `colima`, `microk8s`) and `localHosts` are local. Every other host is production unless `remoteIsProd` is false. When the transcript does not show the target (no `-h`, no `--context`, or a variable set outside the command), it counts as production unless `unknownIsProd` is false.
+
+### Policy file (`--policy file`)
+
+A JSON object; every field is optional.
+
+```json
+{
+  "localHosts": ["*.dev.example.internal", "db"],
+  "prodHosts": ["*.prod.example.internal", "api.example.internal"],
+  "remoteIsProd": true,
+  "unknownIsProd": true,
+  "branches": ["main", "master", "release/*"],
+  "disable": ["pr-merge"],
+  "rules": [
+    { "category": "prod-host-write", "match": "(?:\\S*/)?deploy\\.sh\\s+prod\\b" },
+    { "match": "make\\s+release", "anywhere": true, "flags": "i" }
+  ],
+  "ignore": ["my-guard-selftest"]
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `localHosts` | `[]` | Host or context patterns that are never production. `*` is a wildcard; case is ignored |
+| `prodHosts` | `[]` | Patterns that are always production. They also switch on `prod-api-write` |
+| `remoteIsProd` | `true` | `false`: only `prodHosts` count as production |
+| `unknownIsProd` | `true` | `false`: a command whose host or context is not visible is not asked |
+| `branches` | `["main", "master"]` | Protected branch patterns for `push-to-main` |
+| `disable` | `[]` | Built-in category names to switch off |
+| `rules` | `[]` | Extra rules. `match` is a JavaScript regular expression tested on the command with heredoc bodies cut out. It must match where a command starts (start of a line, or after `;`, `&`, `\|`, `(` or `$(`, behind `VAR=value`, `sudo`, `timeout N` or `command`) unless `"anywhere": true`; allow a path prefix with `(?:\S*/)?`. `category` is one of the names above (default `custom`). `flags` may use `i`, `m`, `s` and `u` |
+| `ignore` | `[]` | Regular expressions. A command matching one is skipped and not counted, for example your own guard's test commands |
+
+Unknown fields are an error, so a typo cannot quietly change a replay. Error messages name the field, never its value. The output reports how many hosts and rules the policy holds, never which.
+
+### Labels (`--labels file`)
+
+Your own verdicts, keyed by tool call id (the `tool_use` id in the transcript): a JSON object `{"<id>": "ask", "<another id>": "allow"}`, or JSON Lines `{"id": "<id>", "label": "ask"}`. `ask` means the command should have been asked about; `allow` means it should not. The replay then reports asks that were right (labelled `ask`), wrong (labelled `allow`) and unlabelled, and misses (labelled `ask` but not asked). Labels do not depend on the policy, so one set scores every policy. vetobench ships no labels.
+
+### Replay limits
+
+- It replays a policy against what the agent tried. It does not know what happened after an ask: the agent might have stopped or changed course.
+- A bare `git push` pushes the current branch, which the transcript does not record, so it is not asked. Context switches (`kubectl config use-context`) earlier in a session are not followed either.
+- SQL read from a file (`-f`, `< file`) or a pipe is not inspected.
+- Shell parsing is approximate. Aliases, functions and the scripts a command calls are not followed.
+- A replay is reproducible only with the same version, window and policy file. The policy file is part of the claim.
