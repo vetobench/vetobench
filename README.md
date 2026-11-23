@@ -43,6 +43,16 @@ npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--jso
 
 The default directory is `~/.claude/projects`. Claude Code records a permission decision for each tool call from about v2.1.306 onward.
 
+## Share your card
+
+```
+npx vetobench --md               # the card as markdown
+npx vetobench --svg card.svg     # also write a 1200×630 image for posts (--force replaces the file)
+npx vetobench --share            # the markdown, then a link to a prefilled "Submit your card" issue
+```
+
+Every format holds counts, shares, dates and version strings only. vetobench never opens the link and sends nothing: read the card, then open the link yourself. Most social sites want PNG, so open the SVG in a browser and screenshot it, or convert it with any SVG tool.
+
 ## License
 
 Apache-2.0

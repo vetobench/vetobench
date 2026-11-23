@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability privately
+    url: https://github.com/vetobench/vetobench/security/advisories/new
+    about: Network activity by vetobench, or output that reveals commands, paths, prompts, rule bodies or secrets. Never in a public issue.
