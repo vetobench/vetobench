@@ -19,6 +19,18 @@ Transcripts are deleted after `cleanupPeriodDays` (default 30). Fix the window w
 | Answer to the agent's question | a `user_*` decision on `AskUserQuestion`. **This is not counted as an approval** |
 | Blocked | reject by the classifier, a safety check, or you |
 
+## Where the agent was running
+
+Each decision is also counted by where the agent was running when it was made.
+
+| Where | Rule |
+|---|---|
+| Main sessions (interactive) | a main-session transcript that never started a loop |
+| Loops | a main session that ran `/loop` or `/goal`, or called `ScheduleWakeup` or `CronCreate`. This labels the whole session, so turns before the loop started count as loop too |
+| Inside subagents | a subagent's own transcript (`…/subagents/*.jsonl`), or a record marked `isSidechain` |
+
+Tool definitions inside API-request records are ignored: they list every tool, so matching on them would mark every session as a loop. `/schedule` is not counted as a loop: it creates a cloud routine that runs elsewhere and leaves no local transcript. Subagents started from a loop count as subagents.
+
 ## Known limits
 
 - **Approvals given in chat** ("go ahead", "post it") are invisible to this field and not counted.

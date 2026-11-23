@@ -29,8 +29,22 @@ test('scanAll counts each gate from the synthetic fixture', async () => {
   assert.equal(t.withDecision, 6)
   assert.deepEqual(t.gates, { rule: 1, 'rules-compound': 1, classifier: 1, 'classifier-rejected': 1, answer: 1, human: 1 })
   assert.deepEqual(t.humanByTool, { Bash: 1 })
+  assert.deepEqual(t.shapeFiles, { interactive: 1, loop: 0, graph: 0 })
+  assert.equal(t.byShape.interactive.withDecision, 6)
   assert.equal(t.firstTs, '2026-11-01')
   assert.equal(t.lastTs, '2026-11-03')
+})
+
+test('decisions are split by where the agent was running: main session, loop, inside subagents', async () => {
+  const t = await scanAll(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'shapes'))
+  assert.equal(t.withDecision, 7)
+  assert.deepEqual(t.shapeFiles, { interactive: 1, loop: 2, graph: 1 })
+  // main-1: one rule, one human; its api-request record lists ScheduleWakeup but must not make it a loop
+  assert.deepEqual(t.byShape.interactive, { withDecision: 2, gates: { rule: 1, human: 1 } })
+  // one loop started by the /loop command, one that scheduled its own wake-up
+  assert.deepEqual(t.byShape.loop, { withDecision: 2, gates: { classifier: 1, rule: 1 } })
+  // a sidechain record inside main-1 plus the subagent's own transcript
+  assert.deepEqual(t.byShape.graph, { withDecision: 3, gates: { classifier: 2, rule: 1 } })
 })
 
 test('a U+2028 inside a JSON string does not split the record (regression: readline did)', async () => {

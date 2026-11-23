@@ -3,7 +3,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
-import { GATES, scanAll, auditSettings } from '../src/analyze.js'
+import { GATES, SHAPES, scanAll, auditSettings } from '../src/analyze.js'
 
 const VERSION = '0.0.1'
 const HELP = `vetobench ${VERSION}: who approved your coding agent's actions?
@@ -57,6 +57,19 @@ function render(t, rules) {
   lines.push('')
   lines.push(`Static rules approved ${pct(staticTotal, d)}, the AI classifier ${pct(g('classifier'), d)}, you ${num(g('human'))} action(s).`)
   if (g('answer')) lines.push(`(${num(g('answer'))} answers to the agent's own questions are not counted as approvals.)`)
+  const shapes = SHAPES.filter(([k]) => t.byShape[k].withDecision)
+  if (shapes.length > 1) {
+    lines.push('')
+    lines.push('Where the agent was running:')
+    const w = Math.max(...shapes.map(([, label]) => label.length))
+    for (const [key, label] of shapes) {
+      const s = t.byShape[key]
+      const sg = (k) => s.gates[k] || 0
+      const st = sg('rule') + sg('rules-compound') + sg('static-other')
+      lines.push(`  ${label.padEnd(w)}  ${num(s.withDecision).padStart(9)}  ${pct(s.withDecision, d).padStart(7)}   ` +
+        `rules ${pct(st, s.withDecision)} · classifier ${pct(sg('classifier'), s.withDecision)} · you ${num(sg('human'))}`)
+    }
+  }
   if (rules.files) {
     lines.push('')
     lines.push(`Your allow-rules now: ${num(rules.allow)} allow · ${num(rules.deny)} deny · ${num(rules.ask)} ask · ` +
@@ -79,8 +92,8 @@ async function main() {
     join(process.cwd(), '.claude', 'settings.local.json'),
   ])
   if (o.json) {
-    const { files, toolResults, withDecision, gates, humanByTool, firstTs, lastTs } = totals
-    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, firstTs, lastTs, gates, humanByTool, rules }, null, 2))
+    const { files, toolResults, withDecision, gates, humanByTool, firstTs, lastTs, byShape, shapeFiles } = totals
+    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules }, null, 2))
   }
   console.log(render(totals, rules))
 }

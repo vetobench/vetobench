@@ -1,0 +1,7 @@
+{"type":"api-request","params":{"tools":[{"name":"ScheduleWakeup"},{"name":"CronCreate"}]},"note":"lists tool definitions only; must not mark this session as a loop"}
+{"type":"assistant","timestamp":"2026-11-10T09:00:00Z","message":{"content":[{"type":"tool_use","id":"m1","name":"Bash"}]}}
+{"type":"user","timestamp":"2026-11-10T09:00:01Z","permissionDecision":{"decision":"accept","source":"config","reasonType":"rule"},"message":{"content":[{"type":"tool_result","tool_use_id":"m1","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-11-10T09:01:00Z","message":{"content":[{"type":"tool_use","id":"m2","name":"Bash"}]}}
+{"type":"user","timestamp":"2026-11-10T09:01:05Z","permissionDecision":{"decision":"accept","source":"user_temporary"},"message":{"content":[{"type":"tool_result","tool_use_id":"m2","content":"ok"}]}}
+{"type":"assistant","isSidechain":true,"timestamp":"2026-11-10T09:02:00Z","message":{"content":[{"type":"tool_use","id":"m3","name":"Edit"}]}}
+{"type":"user","isSidechain":true,"timestamp":"2026-11-10T09:02:01Z","permissionDecision":{"decision":"accept","source":"config","reasonType":"classifier"},"message":{"content":[{"type":"tool_result","tool_use_id":"m3","content":"ok"}]}}

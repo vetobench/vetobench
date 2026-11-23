@@ -1,0 +1,2 @@
+{"type":"assistant","timestamp":"2026-11-10T11:00:00Z","message":{"content":[{"type":"tool_use","id":"w1","name":"ScheduleWakeup"}]}}
+{"type":"user","timestamp":"2026-11-10T11:00:01Z","permissionDecision":{"decision":"accept","source":"config","reasonType":"rule"},"message":{"content":[{"type":"tool_result","tool_use_id":"w1","content":"scheduled"}]}}

@@ -1,6 +1,6 @@
 // vetobench analysis: pure, local, zero-network. Reads agent transcripts and returns aggregates only.
 import { createReadStream, readdirSync, statSync, readFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 /**
  * JSONL lines split on "\n" only. node:readline also breaks on U+2028/U+2029, which are legal inside
@@ -75,25 +75,60 @@ export function parseLine(line) {
   try { return JSON.parse(line.replace(/([:,[]\s*)(-?Infinity|NaN)(?=\s*[,}\]])/g, '$1null')) } catch { return null }
 }
 
+/**
+ * How the agent was running when a decision was made, in display order.
+ * interactive: a main session. loop: a main session that ran /loop or /goal, or scheduled its own wake-ups
+ * (a whole-session label). graph: inside a subagent (its own transcript, or a sidechain record).
+ * /schedule is not a loop here: it creates a cloud routine that runs elsewhere and leaves no local transcript.
+ */
+export const SHAPES = [
+  ['interactive', 'Main sessions (interactive)'],
+  ['loop', 'Loops (/loop, /goal)'],
+  ['graph', 'Inside subagents'],
+]
+const LOOP_TOOLS = new Set(['ScheduleWakeup', 'CronCreate'])
+const LOOP_COMMAND = /<command-name>\/?(loop|goal)<\/command-name>/
+
 function newTotals() {
-  return { files: 0, toolResults: 0, withDecision: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null, versions: {} }
+  const byShape = Object.fromEntries(SHAPES.map(([k]) => [k, { withDecision: 0, gates: {} }]))
+  const shapeFiles = Object.fromEntries(SHAPES.map(([k]) => [k, 0]))
+  return { files: 0, toolResults: 0, withDecision: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null, versions: {}, byShape, shapeFiles }
 }
+
+function addShape(totals, shape, gate, n = 1) {
+  const s = totals.byShape[shape]
+  s.withDecision += n
+  s.gates[gate] = (s.gates[gate] || 0) + n
+}
+
+const textOf = (content) => typeof content === 'string' ? content
+  : Array.isArray(content) ? content.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ') : ''
 
 /** Scan one transcript file into totals (mutates totals). since/until are 'YYYY-MM-DD' strings (until exclusive). */
 export async function scanFile(path, totals, { since = null, until = null } = {}) {
   const toolNames = new Map()
+  const isSubagentFile = path.split(sep).includes('subagents')
+  const mainGates = {} // main-thread decisions; their shape (interactive or loop) is known only after the whole file
+  let ranLoop = false
   totals.files += 1
   for await (const line of jsonlLines(path)) {
+    // api-request records list every tool definition (ScheduleWakeup included): never read them as activity.
     if (line.startsWith('{"type":"api-request')) continue
     const isUse = line.includes('"tool_use"')
     const isResult = line.includes('"tool_result"')
-    if (!isUse && !isResult) continue
+    const isCommand = !isSubagentFile && line.includes('<command-name>')
+    if (!isUse && !isResult && !isCommand) continue
     const o = parseLine(line)
     if (!o) continue
     const content = o?.message?.content
+    if (isCommand && o.type === 'user' && LOOP_COMMAND.test(textOf(content))) ranLoop = true
     if (!Array.isArray(content)) continue
     if (o.type === 'assistant') {
-      for (const b of content) if (b && b.type === 'tool_use') toolNames.set(b.id, b.name)
+      for (const b of content) {
+        if (!b || b.type !== 'tool_use') continue
+        toolNames.set(b.id, b.name)
+        if (LOOP_TOOLS.has(b.name)) ranLoop = true
+      }
       continue
     }
     if (o.type !== 'user') continue
@@ -112,8 +147,13 @@ export async function scanFile(path, totals, { since = null, until = null } = {}
       const gate = gateOf(pd, tool)
       totals.gates[gate] = (totals.gates[gate] || 0) + 1
       if (gate === 'human') totals.humanByTool[tool] = (totals.humanByTool[tool] || 0) + 1
+      if (isSubagentFile || o.isSidechain === true) addShape(totals, 'graph', gate)
+      else mainGates[gate] = (mainGates[gate] || 0) + 1
     }
   }
+  const shape = isSubagentFile ? 'graph' : ranLoop ? 'loop' : 'interactive'
+  totals.shapeFiles[shape] += 1
+  for (const [gate, n] of Object.entries(mainGates)) addShape(totals, shape, gate, n)
   return totals
 }
 
