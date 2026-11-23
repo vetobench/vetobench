@@ -47,6 +47,17 @@ test('decisions are split by where the agent was running: main session, loop, in
   assert.deepEqual(t.byShape.graph, { withDecision: 3, gates: { classifier: 2, rule: 1 } })
 })
 
+test('a tool call copied into a second transcript (resumed session) is counted once', async () => {
+  const t = await scanAll(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'repeats'))
+  assert.equal(t.files, 2)
+  assert.equal(t.toolResults, 3)
+  assert.equal(t.withDecision, 3)
+  assert.equal(t.repeats, 1)
+  assert.deepEqual(t.gates, { rule: 1, classifier: 1, human: 1 })
+  assert.ok(!Object.keys(t).includes('seen'), 'the id set must never be enumerable (it would reach --json)')
+  assert.ok(!JSON.stringify(t).includes('r1'))
+})
+
 test('a U+2028 inside a JSON string does not split the record (regression: readline did)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vetobench-'))
   try {

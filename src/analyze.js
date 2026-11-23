@@ -92,8 +92,15 @@ const LOOP_COMMAND = /<command-name>\/?(loop|goal)<\/command-name>/
 function newTotals() {
   const byShape = Object.fromEntries(SHAPES.map(([k]) => [k, { withDecision: 0, gates: {} }]))
   const shapeFiles = Object.fromEntries(SHAPES.map(([k]) => [k, 0]))
-  return { files: 0, toolResults: 0, withDecision: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null, versions: {}, byShape, shapeFiles,
-    wildcard: { actions: 0, examined: 0, wordBoundary: 0, byFamily: {} } }
+  const totals = { files: 0, toolResults: 0, withDecision: 0, repeats: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null, versions: {},
+    byShape, shapeFiles, wildcard: { actions: 0, examined: 0, wordBoundary: 0, byFamily: {} } }
+  return withSeen(totals)
+}
+
+// Tool-call ids already counted, shared across files. Non-enumerable, so it never reaches --json or any renderer.
+function withSeen(totals) {
+  if (!totals.seen) Object.defineProperty(totals, 'seen', { value: new Set(), enumerable: false })
+  return totals
 }
 
 function addShape(totals, shape, gate, n = 1) {
@@ -115,6 +122,7 @@ export async function scanFile(path, totals, { since = null, until = null, attri
   const isSubagentFile = path.split(sep).includes('subagents')
   const mainGates = {} // main-thread decisions; their shape (interactive or loop) is known only after the whole file
   let ranLoop = false
+  const seen = withSeen(totals).seen
   totals.files += 1
   for await (const line of jsonlLines(path)) {
     // api-request records list every tool definition (ScheduleWakeup included): never read them as activity.
@@ -142,6 +150,12 @@ export async function scanFile(path, totals, { since = null, until = null, attri
     if ((since && day < since) || (until && day >= until)) continue
     for (const b of content) {
       if (!b || b.type !== 'tool_result') continue
+      // Count each tool call once. A resumed or forked session can copy earlier records into a new transcript,
+      // so the same tool_use_id may appear in several files; the first one read counts.
+      if (b.tool_use_id) {
+        if (seen.has(b.tool_use_id)) { totals.repeats = (totals.repeats || 0) + 1; continue }
+        seen.add(b.tool_use_id)
+      }
       totals.toolResults += 1
       const command = commands.get(b.tool_use_id)
       commands.delete(b.tool_use_id) // first result only, as in the original analysis

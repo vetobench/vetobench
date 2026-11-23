@@ -89,6 +89,7 @@ function render(t, rules) {
   lines.push('')
   lines.push(`Static rules approved ${pct(staticTotal, d)}, the AI classifier ${pct(g('classifier'), d)}, you ${num(g('human'))} action(s).`)
   if (g('answer')) lines.push(`(${num(g('answer'))} answers to the agent's own questions are not counted as approvals.)`)
+  if (t.repeats) lines.push(`(${num(t.repeats)} repeated record(s) of the same tool call, copied into another transcript, were counted once.)`)
   const wc = t.wildcard
   if (wc.actions) {
     lines.push(`At least ${num(wc.actions)} static-approved shell action${wc.actions === 1 ? '' : 's'} relied on a wildcard ` +
@@ -167,9 +168,9 @@ async function main() {
   if (o.md) return console.log(renderMarkdown(totals, rules, { version: VERSION }))
   if (o.share) return console.log(renderShare(totals, rules, { version: VERSION }))
   if (o.json) {
-    const { files, toolResults, withDecision, gates, humanByTool, firstTs, lastTs, byShape, shapeFiles, secrets } = totals
+    const { files, toolResults, withDecision, repeats, gates, humanByTool, firstTs, lastTs, byShape, shapeFiles, secrets } = totals
     const wildcard = { ...totals.wildcard, rules: allow.rules.length }
-    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules, wildcard,
+    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, repeats, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules, wildcard,
       ...(secrets && { secrets }) }, null, 2))
   }
   console.log(render(totals, rules))

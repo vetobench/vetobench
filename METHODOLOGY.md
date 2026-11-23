@@ -4,6 +4,8 @@
 
 Claude Code writes one JSONL transcript per session under `~/.claude/projects/` (subagents get their own files). From about v2.1.306, each tool-result record carries an undocumented `permissionDecision` object: `decision` (accept / reject / cancelled), `source` (config, user_temporary, user_reject, user_abort, …) and a reason (`reasonType` or `reasonCode`: rule, subcommandResults, classifier, mode, safetyCheck, …). vetobench reads only those fields, the tool name of the matching tool call, the timestamp and the version.
 
+Each tool call is counted once. A resumed or forked session can copy earlier records into a new transcript, so the same `tool_use_id` can appear in several files; only the first one read counts, and `repeats` (in `--json`, and a line on the card) reports how many copies were skipped. On the author's 30-day corpus this was 844 of 237,578 recorded decisions (0.36%).
+
 Transcripts are deleted after `cleanupPeriodDays` (default 30). Fix the window with `--since` / `--until` so a run can be repeated.
 
 ## Gates
