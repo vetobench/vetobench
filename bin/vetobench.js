@@ -2,8 +2,9 @@
 // vetobench: who approved your coding agent's actions? Local only: this program makes no network calls.
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { GATES, SHAPES, scanAll, auditSettings } from '../src/analyze.js'
+import { renderMarkdown, renderShare, renderSvg } from '../src/render.js'
 
 const VERSION = '0.0.1'
 const HELP = `vetobench ${VERSION}: who approved your coding agent's actions?
@@ -13,6 +14,9 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
   transcripts-dir   default: ~/.claude/projects
   --since / --until window by UTC day (until is exclusive)
   --json            aggregates as JSON (safe to share: counts only)
+  --md              the card as markdown, to paste into an issue or a post
+  --share           the markdown card, then a link to a prefilled GitHub issue (you open it)
+  --svg FILE        also write the card as a 1200x630 SVG image; --force replaces FILE
 
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
@@ -23,6 +27,10 @@ function parseArgs(argv) {
     if (a === '--json') o.json = true
     else if (a === '--since') o.since = argv[++i]
     else if (a === '--until') o.until = argv[++i]
+    else if (a === '--md') o.md = true
+    else if (a === '--share') o.share = true
+    else if (a === '--svg') o.svg = argv[++i] ?? ''
+    else if (a === '--force') o.force = true
     else if (a === '-h' || a === '--help') o.help = true
     else if (a === '--version') o.version = true
     else if (!a.startsWith('-')) o.dir = a
@@ -31,6 +39,8 @@ function parseArgs(argv) {
   for (const k of ['since', 'until']) {
     if (o[k] && !/^\d{4}-\d{2}-\d{2}$/.test(o[k])) throw new Error(`--${k} must be YYYY-MM-DD`)
   }
+  if ([o.json, o.md, o.share].filter(Boolean).length > 1) throw new Error('choose one of --json, --md and --share')
+  if (o.svg !== undefined && (!o.svg || o.svg.startsWith('-'))) throw new Error('--svg needs an output file, e.g. --svg card.svg')
   return o
 }
 
@@ -80,17 +90,33 @@ function render(t, rules) {
   return lines.join('\n')
 }
 
+const SVG_EXISTS = 'the --svg file already exists; pass --force to replace it'
+
+// 'wx' refuses an existing file atomically. Errors name the code only, not the path.
+function writeSvg(file, svg, force) {
+  try {
+    writeFileSync(file, svg, { flag: force ? 'w' : 'wx' })
+  } catch (e) {
+    throw new Error(e.code === 'EEXIST' ? SVG_EXISTS : `could not write the --svg file (${e.code || 'error'})`)
+  }
+  console.error('vetobench: wrote the 1200x630 SVG card. Look it over before you post it.')
+}
+
 async function main() {
   const o = parseArgs(process.argv.slice(2))
   if (o.help) return console.log(HELP)
   if (o.version) return console.log(VERSION)
   if (!existsSync(o.dir)) throw new Error(`no transcripts directory at ${o.dir}`)
+  if (o.svg && !o.force && existsSync(o.svg)) throw new Error(SVG_EXISTS) // fail before a long scan
   const totals = await scanAll(o.dir, { since: o.since, until: o.until })
   const rules = auditSettings([
     join(homedir(), '.claude', 'settings.json'),
     join(process.cwd(), '.claude', 'settings.json'),
     join(process.cwd(), '.claude', 'settings.local.json'),
   ])
+  if (o.svg) writeSvg(o.svg, renderSvg(totals, { version: VERSION }), o.force)
+  if (o.md) return console.log(renderMarkdown(totals, rules, { version: VERSION }))
+  if (o.share) return console.log(renderShare(totals, rules, { version: VERSION }))
   if (o.json) {
     const { files, toolResults, withDecision, gates, humanByTool, firstTs, lastTs, byShape, shapeFiles } = totals
     return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules }, null, 2))

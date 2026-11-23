@@ -1,0 +1,48 @@
+name: Submit your card
+description: Share your vetobench card. Counts and shares only, never transcripts.
+title: "Card: "
+labels: ["card"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing. Run `npx vetobench --share` to fill this form for you, or paste the output of `npx vetobench --md` below.
+        This issue is public. Read the card once before you submit: it should hold only counts, shares, dates and version strings.
+  - type: textarea
+    id: card
+    attributes:
+      label: Your card
+      description: The full output of `npx vetobench --md`, unedited.
+      placeholder: |
+        ### Who approved my coding agent's actions?
+
+        vetobench 0.0.1 · 2026-11-01 to 2026-11-30 · ...
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Claude Code version range
+      description: The "Claude Code" range from the card (filled in by --share), or the output of `claude --version`.
+      placeholder: 2.1.306 to 2.1.320
+    validations:
+      required: false
+  - type: dropdown
+    id: usage
+    attributes:
+      label: Rough usage
+      description: How the transcripts behind this card were made.
+      options:
+        - Solo, one person
+        - Team, shared settings
+        - Team, everyone with their own settings
+        - Mixed or not sure
+    validations:
+      required: false
+  - type: checkboxes
+    id: aggregates
+    attributes:
+      label: Only aggregates
+      options:
+        - label: I read the card. It contains only counts, shares, dates and version strings, with no commands, file paths, prompts, rule bodies or secrets.
+          required: true
