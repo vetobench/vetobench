@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(ssh:*)",
+      "Bash(git:*)",
+      "Bash(git status:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm:*)",
+      "Read",
+      "Edit"
+    ],
+    "deny": []
+  }
+}

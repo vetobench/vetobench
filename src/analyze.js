@@ -92,7 +92,8 @@ const LOOP_COMMAND = /<command-name>\/?(loop|goal)<\/command-name>/
 function newTotals() {
   const byShape = Object.fromEntries(SHAPES.map(([k]) => [k, { withDecision: 0, gates: {} }]))
   const shapeFiles = Object.fromEntries(SHAPES.map(([k]) => [k, 0]))
-  return { files: 0, toolResults: 0, withDecision: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null, versions: {}, byShape, shapeFiles }
+  return { files: 0, toolResults: 0, withDecision: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null, versions: {}, byShape, shapeFiles,
+    wildcard: { actions: 0, examined: 0, wordBoundary: 0, byFamily: {} } }
 }
 
 function addShape(totals, shape, gate, n = 1) {
@@ -104,9 +105,13 @@ function addShape(totals, shape, gate, n = 1) {
 const textOf = (content) => typeof content === 'string' ? content
   : Array.isArray(content) ? content.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ') : ''
 
-/** Scan one transcript file into totals (mutates totals). since/until are 'YYYY-MM-DD' strings (until exclusive). */
-export async function scanFile(path, totals, { since = null, until = null } = {}) {
+/**
+ * Scan one transcript file into totals (mutates totals). since/until are 'YYYY-MM-DD' strings (until exclusive).
+ * attribute(command) -> { families, wordBoundary } is called for each static-approved Bash command (see attribution.js).
+ */
+export async function scanFile(path, totals, { since = null, until = null, attribute = null } = {}) {
   const toolNames = new Map()
+  const commands = new Map() // tool_use id -> Bash command, held only until its result is read; never in totals
   const isSubagentFile = path.split(sep).includes('subagents')
   const mainGates = {} // main-thread decisions; their shape (interactive or loop) is known only after the whole file
   let ranLoop = false
@@ -128,6 +133,7 @@ export async function scanFile(path, totals, { since = null, until = null } = {}
         if (!b || b.type !== 'tool_use') continue
         toolNames.set(b.id, b.name)
         if (LOOP_TOOLS.has(b.name)) ranLoop = true
+        if (attribute && b.name === 'Bash') commands.set(b.id, b.input && b.input.command)
       }
       continue
     }
@@ -137,6 +143,8 @@ export async function scanFile(path, totals, { since = null, until = null } = {}
     for (const b of content) {
       if (!b || b.type !== 'tool_result') continue
       totals.toolResults += 1
+      const command = commands.get(b.tool_use_id)
+      commands.delete(b.tool_use_id) // first result only, as in the original analysis
       if (day && (!totals.firstTs || day < totals.firstTs)) totals.firstTs = day
       if (day && (!totals.lastTs || day > totals.lastTs)) totals.lastTs = day
       const pd = o.permissionDecision
@@ -149,6 +157,14 @@ export async function scanFile(path, totals, { since = null, until = null } = {}
       if (gate === 'human') totals.humanByTool[tool] = (totals.humanByTool[tool] || 0) + 1
       if (isSubagentFile || o.isSidechain === true) addShape(totals, 'graph', gate)
       else mainGates[gate] = (mainGates[gate] || 0) + 1
+      if (attribute && (gate === 'rule' || gate === 'rules-compound') && tool === 'Bash' && command && typeof command === 'string') {
+        const w = totals.wildcard
+        const { families, wordBoundary } = attribute(command)
+        w.examined += 1
+        if (families.length) w.actions += 1
+        if (wordBoundary) w.wordBoundary += 1
+        for (const f of families) if (BROAD.has(f)) w.byFamily[f] = (w.byFamily[f] || 0) + 1 // fixed names only
+      }
     }
   }
   const shape = isSubagentFile ? 'graph' : ranLoop ? 'loop' : 'interactive'
@@ -163,8 +179,13 @@ export async function scanAll(dir, opts = {}) {
   return totals
 }
 
-const BROAD = new Set(['python', 'python3', 'bash', 'sh', 'zsh', 'node', 'npx', 'bunx', 'perl', 'ruby', 'curl', 'wget', 'ssh',
-  'scp', 'rsync', 'docker', 'git', 'gh', 'env', 'export', 'xargs', 'bun', 'npm', 'pip', 'pip3', 'brew', 'sudo', 'eval'])
+/**
+ * Interpreter and remote commands whose bare prefix rule (`python3:*`) allows nearly anything: the fixed family names
+ * of wildcard attribution. python3.10 and 'bunx tsx' come from the original analysis, so CLAIMS #4 can replay.
+ */
+export const BROAD = new Set(['python', 'python3', 'python3.10', 'bash', 'sh', 'zsh', 'node', 'npx', 'bunx', 'bunx tsx', 'perl',
+  'ruby', 'curl', 'wget', 'ssh', 'scp', 'rsync', 'docker', 'git', 'gh', 'env', 'export', 'xargs', 'bun', 'npm', 'pip', 'pip3',
+  'brew', 'sudo', 'eval'])
 const SECRET = [
   /PGPASSWORD=\S+/,
   /(postgres(ql)?|mysql|redis|mongodb(\+srv)?):\/\/[^:\s/"']+:[^@\s"']{4,}@/,
