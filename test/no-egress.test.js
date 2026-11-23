@@ -11,6 +11,8 @@ const FORBIDDEN = [
   /from\s+['"](node:)?(http|https|http2|net|tls|dgram|dns|child_process|worker_threads|cluster|inspector)['"]/,
   /require\(\s*['"](node:)?(http|https|http2|net|tls|dgram|dns|child_process|worker_threads|cluster|inspector)['"]\s*\)/,
   /import\(\s*['"](node:)?(http|https|http2|net|tls|dgram|dns|child_process)['"]\s*\)/,
+  /import\s+['"](node:)?(http|https|http2|net|tls|dgram|dns|child_process|worker_threads|cluster|inspector)['"]/,
+  /\bimport\s*\(\s*[^'"\s)]/, // dynamic import of a computed specifier could load anything
   /\bfetch\s*\(/,
   /\bWebSocket\b/,
   /\bXMLHttpRequest\b/,

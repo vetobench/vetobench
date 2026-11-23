@@ -117,7 +117,7 @@ function cli(args, { home = {}, work = {} } = {}) {
 test('card and --json report the wildcard count from --rules files', () => {
   const card = cli([PROJECTS, '--rules', SETTINGS, '--rules', LOCAL])
   assert.equal(card.status, 0, card.stderr)
-  assert.ok(card.stdout.includes('At least 9 static-approved shell actions relied on a wildcard interpreter or remote rule ' +
+  assert.ok(card.stdout.includes('At least 8 static-approved shell actions relied on a wildcard interpreter or remote rule ' +
     '(python3 4 · ssh 3 · git 2 · sh 1).'), card.stdout)
   const json = JSON.parse(cli([PROJECTS, '--rules', SETTINGS, '--rules', LOCAL, '--json']).stdout)
   assert.deepEqual(json.wildcard, { actions: 9, examined: 12, wordBoundary: 8, byFamily: { python3: 4, ssh: 3, git: 2, sh: 1 }, rules: 8 })
@@ -141,7 +141,7 @@ test('the card line is hidden when no action relied on a wildcard', () => {
     const md = cli([PROJECTS, '--rules', p, '--md'])
     assert.equal(md.status, 0, md.stderr)
     assert.ok(!md.stdout.includes('Wildcard reliance'), md.stdout)
-    assert.ok(cli([PROJECTS, '--rules', SETTINGS, '--md']).stdout.includes('**Wildcard reliance:** 8 static-approved'))
+    assert.ok(cli([PROJECTS, '--rules', SETTINGS, '--md']).stdout.includes('**Wildcard reliance:** at least 8 static-approved'))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

@@ -50,7 +50,7 @@ test('markdown card: gates table, headline numbers, shapes, rules, wildcard and 
   assert.ok(lines.includes('| Inside subagents | 7,000 | 70.0% | 57.1% | 24.3% | 0 |'))
   assert.ok(!lines.some((l) => l.startsWith('| Loops')), 'shapes without decisions are skipped')
   assert.ok(lines.includes('**Allow-rules now:** 50 allow · 1 deny · 0 ask · 3 wildcard interpreter/remote rule(s) · 1 with a secret inline'))
-  assert.ok(lines.includes('**Wildcard reliance:** 1,234 static-approved shell action(s) relied on a wildcard interpreter/remote rule (python3 1,000 · ssh 200 · node 34)'))
+  assert.ok(lines.includes('**Wildcard reliance:** at least 1,234 static-approved shell action(s) relied on a wildcard interpreter/remote rule (python3 1,000 · ssh 200 · node 34)'))
   assert.ok(lines.includes('**Secrets in plaintext transcripts:** 15 across 4 transcript(s) (database-url 12 · api-key 3)'))
   assert.equal(lines.at(-1), '_Counts only, made locally: nothing left my machine. Approvals given in chat are not counted._')
   assert.ok(!md.includes('Bash'), 'per-tool names stay out of the card')

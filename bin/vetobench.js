@@ -2,7 +2,7 @@
 // vetobench: who approved your coding agent's actions? Local only: this program makes no network calls.
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, statSync, writeFileSync } from 'node:fs'
 import { GATES, SHAPES, scanAll, auditSettings } from '../src/analyze.js'
 import { renderMarkdown, renderShare, renderSvg } from '../src/render.js'
 import { loadAllowRules, attributeCommand } from '../src/attribution.js'
@@ -33,8 +33,11 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--json') o.json = true
-    else if (a === '--since') o.since = argv[++i]
-    else if (a === '--until') o.until = argv[++i]
+    else if (a === '--since' || a === '--until') {
+      const v = argv[++i]
+      if (!v || v.startsWith('-')) throw new Error(`${a} needs a date, YYYY-MM-DD`)
+      o[a.slice(2)] = v
+    }
     else if (a === '--md') o.md = true
     else if (a === '--share') o.share = true
     else if (a === '--svg') o.svg = argv[++i] ?? ''
@@ -46,7 +49,11 @@ function parseArgs(argv) {
     else if (a === '--secrets') o.secrets = true
     else if (a === '-h' || a === '--help') o.help = true
     else if (a === '--version') o.version = true
-    else if (!a.startsWith('-')) o.dir = a
+    else if (!a.startsWith('-')) {
+      if (o.dirGiven) throw new Error('give one transcripts directory')
+      o.dir = a
+      o.dirGiven = true
+    }
     else throw new Error(`unknown option: ${a}`)
   }
   for (const k of ['since', 'until']) {
@@ -54,6 +61,7 @@ function parseArgs(argv) {
   }
   if ([o.json, o.md, o.share].filter(Boolean).length > 1) throw new Error('choose one of --json, --md and --share')
   if (o.svg !== undefined && (!o.svg || o.svg.startsWith('-'))) throw new Error('--svg needs an output file, e.g. --svg card.svg')
+  if (o.force && o.svg === undefined) throw new Error('--force only applies to --svg')
   return o
 }
 
@@ -91,8 +99,10 @@ function render(t, rules) {
   if (g('answer')) lines.push(`(${num(g('answer'))} answers to the agent's own questions are not counted as approvals.)`)
   if (t.repeats) lines.push(`(${num(t.repeats)} repeated record(s) of the same tool call, copied into another transcript, were counted once.)`)
   const wc = t.wildcard
-  if (wc.actions) {
-    lines.push(`At least ${num(wc.actions)} static-approved shell action${wc.actions === 1 ? '' : 's'} relied on a wildcard ` +
+  // The lower of the two matchings (plain prefix, word boundary) is the honest "at least".
+  const wcAtLeast = Math.min(wc.actions, wc.wordBoundary ?? wc.actions)
+  if (wcAtLeast) {
+    lines.push(`At least ${num(wcAtLeast)} static-approved shell action${wcAtLeast === 1 ? '' : 's'} relied on a wildcard ` +
       `interpreter or remote rule (${familyList(wc.byFamily)}).`)
   }
   const shapes = SHAPES.filter(([k]) => t.byShape[k].withDecision)
@@ -151,7 +161,7 @@ async function main() {
   const o = parseArgs(process.argv.slice(2))
   if (o.help) return console.log(HELP)
   if (o.version) return console.log(VERSION)
-  if (!existsSync(o.dir)) throw new Error(`no transcripts directory at ${o.dir}`)
+  if (!existsSync(o.dir) || !statSync(o.dir).isDirectory()) throw new Error(`no transcripts directory at ${o.dir}`)
   if (o.svg && !o.force && existsSync(o.svg)) throw new Error(SVG_EXISTS) // fail before a long scan
   const settings = [
     join(homedir(), '.claude', 'settings.json'),

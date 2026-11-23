@@ -1,6 +1,6 @@
 // vetobench analysis: pure, local, zero-network. Reads agent transcripts and returns aggregates only.
 import { createReadStream, readdirSync, statSync, readFileSync, existsSync } from 'node:fs'
-import { join, sep } from 'node:path'
+import { join, relative, sep } from 'node:path'
 
 /**
  * JSONL lines split on "\n" only. node:readline also breaks on U+2028/U+2029, which are legal inside
@@ -92,16 +92,31 @@ const LOOP_COMMAND = /<command-name>\/?(loop|goal)<\/command-name>/
 function newTotals() {
   const byShape = Object.fromEntries(SHAPES.map(([k]) => [k, { withDecision: 0, gates: {} }]))
   const shapeFiles = Object.fromEntries(SHAPES.map(([k]) => [k, 0]))
-  const totals = { files: 0, toolResults: 0, withDecision: 0, repeats: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null, versions: {},
-    byShape, shapeFiles, wildcard: { actions: 0, examined: 0, wordBoundary: 0, byFamily: {} } }
-  return withSeen(totals)
+  const totals = { files: 0, unreadable: 0, toolResults: 0, withDecision: 0, repeats: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null,
+    versions: {}, byShape, shapeFiles, wildcard: { actions: 0, examined: 0, wordBoundary: 0, byFamily: {} } }
+  return withState(totals)
 }
 
-// Tool-call ids already counted, shared across files. Non-enumerable, so it never reaches --json or any renderer.
-function withSeen(totals) {
-  if (!totals.seen) Object.defineProperty(totals, 'seen', { value: new Set(), enumerable: false })
+// Cross-file state, keyed by tool_use id: tool names, Bash commands awaiting their result, and the ids already counted.
+// Shared across files because a resumed or forked session can put a tool call and a copy of its result in different
+// transcripts. Non-enumerable, so none of it can reach --json or a renderer.
+function withState(totals) {
+  if (!totals.state) {
+    Object.defineProperty(totals, 'state', { enumerable: false,
+      value: { toolNames: new Map(), commands: new Map(), results: new Set(), decided: new Set() } })
+  }
   return totals
 }
+
+// Claude Code's built-in tools: the only tool names ever printed. MCP tools fold into "mcp", because server names are
+// chosen by the user and can name clients or hosts; anything else folds into "other".
+const BUILTIN_TOOLS = new Set(['Agent', 'Artifact', 'ArtifactComments', 'ArtifactData', 'AskUserQuestion', 'Bash', 'BashOutput',
+  'CronCreate', 'CronDelete', 'Edit', 'EnterPlanMode', 'EnterWorktree', 'ExitPlanMode', 'ExitWorktree', 'Glob', 'Grep', 'KillShell',
+  'LS', 'LSP', 'Monitor', 'MultiEdit', 'NotebookEdit', 'NotebookRead', 'Read', 'ScheduleWakeup', 'SendMessage', 'Skill',
+  'SlashCommand', 'Task', 'TodoWrite', 'ToolSearch', 'WebFetch', 'WebSearch', 'Workflow', 'Write'])
+export const toolLabel = (name) => BUILTIN_TOOLS.has(name) ? name : String(name || '').startsWith('mcp__') ? 'mcp' : 'other'
+
+const DAY = /^\d{4}-\d{2}-\d{2}$/
 
 function addShape(totals, shape, gate, n = 1) {
   const s = totals.byShape[shape]
@@ -116,80 +131,97 @@ const textOf = (content) => typeof content === 'string' ? content
  * Scan one transcript file into totals (mutates totals). since/until are 'YYYY-MM-DD' strings (until exclusive).
  * attribute(command) -> { families, wordBoundary } is called for each static-approved Bash command (see attribution.js).
  */
-export async function scanFile(path, totals, { since = null, until = null, attribute = null } = {}) {
-  const toolNames = new Map()
-  const commands = new Map() // tool_use id -> Bash command, held only until its result is read; never in totals
-  const isSubagentFile = path.split(sep).includes('subagents')
+export async function scanFile(path, totals, { since = null, until = null, attribute = null, root = null } = {}) {
+  const { toolNames, commands, results, decided } = withState(totals).state
+  // Only path segments below the scanned directory count, so a parent folder named "subagents" changes nothing.
+  const isSubagentFile = (root ? relative(root, path) : path).split(sep).includes('subagents')
   const mainGates = {} // main-thread decisions; their shape (interactive or loop) is known only after the whole file
   let ranLoop = false
-  const seen = withSeen(totals).seen
   totals.files += 1
-  for await (const line of jsonlLines(path)) {
-    // api-request records list every tool definition (ScheduleWakeup included): never read them as activity.
-    if (line.startsWith('{"type":"api-request')) continue
-    const isUse = line.includes('"tool_use"')
-    const isResult = line.includes('"tool_result"')
-    const isCommand = !isSubagentFile && line.includes('<command-name>')
-    if (!isUse && !isResult && !isCommand) continue
-    const o = parseLine(line)
-    if (!o) continue
-    const content = o?.message?.content
-    if (isCommand && o.type === 'user' && LOOP_COMMAND.test(textOf(content))) ranLoop = true
-    if (!Array.isArray(content)) continue
-    if (o.type === 'assistant') {
-      for (const b of content) {
-        if (!b || b.type !== 'tool_use') continue
-        toolNames.set(b.id, b.name)
-        if (LOOP_TOOLS.has(b.name)) ranLoop = true
-        if (attribute && b.name === 'Bash') commands.set(b.id, b.input && b.input.command)
-      }
-      continue
-    }
-    if (o.type !== 'user') continue
-    const day = String(o.timestamp || '').slice(0, 10)
-    if ((since && day < since) || (until && day >= until)) continue
-    for (const b of content) {
-      if (!b || b.type !== 'tool_result') continue
-      // Count each tool call once. A resumed or forked session can copy earlier records into a new transcript,
-      // so the same tool_use_id may appear in several files; the first one read counts.
-      if (b.tool_use_id) {
-        if (seen.has(b.tool_use_id)) { totals.repeats = (totals.repeats || 0) + 1; continue }
-        seen.add(b.tool_use_id)
-      }
-      totals.toolResults += 1
-      const command = commands.get(b.tool_use_id)
-      commands.delete(b.tool_use_id) // first result only, as in the original analysis
-      if (day && (!totals.firstTs || day < totals.firstTs)) totals.firstTs = day
-      if (day && (!totals.lastTs || day > totals.lastTs)) totals.lastTs = day
-      const pd = o.permissionDecision
-      if (!pd || typeof pd !== 'object') continue
-      totals.withDecision += 1
-      if (o.version) totals.versions[o.version] = (totals.versions[o.version] || 0) + 1
-      const tool = toolNames.get(b.tool_use_id) || 'unknown'
-      const gate = gateOf(pd, tool)
-      totals.gates[gate] = (totals.gates[gate] || 0) + 1
-      if (gate === 'human') totals.humanByTool[tool] = (totals.humanByTool[tool] || 0) + 1
-      if (isSubagentFile || o.isSidechain === true) addShape(totals, 'graph', gate)
-      else mainGates[gate] = (mainGates[gate] || 0) + 1
-      if (attribute && (gate === 'rule' || gate === 'rules-compound') && tool === 'Bash' && command && typeof command === 'string') {
-        const w = totals.wildcard
-        const { families, wordBoundary } = attribute(command)
-        w.examined += 1
-        if (families.length) w.actions += 1
-        if (wordBoundary) w.wordBoundary += 1
-        for (const f of families) if (BROAD.has(f)) w.byFamily[f] = (w.byFamily[f] || 0) + 1 // fixed names only
-      }
-    }
+  try {
+    await scanLines(path)
+  } catch {
+    // Unreadable or vanished file (retention can delete one mid-scan): skip it and keep the counts so far.
+    // Never rethrow: the error message would carry the path.
+    totals.unreadable += 1
   }
   const shape = isSubagentFile ? 'graph' : ranLoop ? 'loop' : 'interactive'
   totals.shapeFiles[shape] += 1
   for (const [gate, n] of Object.entries(mainGates)) addShape(totals, shape, gate, n)
   return totals
+
+  async function scanLines(path) {
+    for await (const line of jsonlLines(path)) {
+      // api-request records list every tool definition (ScheduleWakeup included): never read them as activity.
+      if (line.startsWith('{"type":"api-request')) continue
+      const isUse = line.includes('"tool_use"')
+      const isResult = line.includes('"tool_result"')
+      const isCommand = !isSubagentFile && line.includes('<command-name>')
+      if (!isUse && !isResult && !isCommand) continue
+      const o = parseLine(line)
+      if (!o) continue
+      const content = o?.message?.content
+      if (isCommand && o.type === 'user' && LOOP_COMMAND.test(textOf(content))) ranLoop = true
+      if (!Array.isArray(content)) continue
+      if (o.type === 'assistant') {
+        for (const b of content) {
+          if (!b || b.type !== 'tool_use') continue
+          if (b.id && b.name) toolNames.set(b.id, b.name)
+          if (LOOP_TOOLS.has(b.name)) ranLoop = true
+          if (attribute && b.name === 'Bash' && !decided.has(b.id)) commands.set(b.id, b.input && b.input.command)
+        }
+        continue
+      }
+      if (o.type !== 'user') continue
+      const day = String(o.timestamp || '').slice(0, 10)
+      if ((since && day < since) || (until && day >= until)) continue
+      for (const b of content) {
+        if (!b || b.type !== 'tool_result') continue
+        // Count each tool call once. A resumed or forked session can copy records into another transcript, so the
+        // same tool_use_id can appear in several files. The first copy counts as the tool call; its decision is the
+        // first copy that carries one (a copy without one must not hide a later copy that has it).
+        const id = b.tool_use_id
+        if (id && results.has(id)) totals.repeats += 1
+        else {
+          if (id) results.add(id)
+          totals.toolResults += 1
+          if (DAY.test(day)) {
+            if (!totals.firstTs || day < totals.firstTs) totals.firstTs = day
+            if (!totals.lastTs || day > totals.lastTs) totals.lastTs = day
+          }
+        }
+        const pd = o.permissionDecision
+        if (!pd || typeof pd !== 'object') continue
+        if (id) {
+          if (decided.has(id)) continue
+          decided.add(id)
+        }
+        const command = commands.get(id)
+        commands.delete(id) // held only until its decision is counted
+        totals.withDecision += 1
+        if (o.version) totals.versions[o.version] = (totals.versions[o.version] || 0) + 1
+        const tool = toolNames.get(id) || 'unknown'
+        const gate = gateOf(pd, tool)
+        totals.gates[gate] = (totals.gates[gate] || 0) + 1
+        if (gate === 'human') totals.humanByTool[toolLabel(tool)] = (totals.humanByTool[toolLabel(tool)] || 0) + 1
+        if (isSubagentFile || o.isSidechain === true) addShape(totals, 'graph', gate)
+        else mainGates[gate] = (mainGates[gate] || 0) + 1
+        if (attribute && (gate === 'rule' || gate === 'rules-compound') && tool === 'Bash' && command && typeof command === 'string') {
+          const w = totals.wildcard
+          const { families, wordBoundary } = attribute(command)
+          w.examined += 1
+          if (families.length) w.actions += 1
+          if (wordBoundary) w.wordBoundary += 1
+          for (const f of families) if (BROAD.has(f)) w.byFamily[f] = (w.byFamily[f] || 0) + 1 // fixed names only
+        }
+      }
+    }
+  }
 }
 
 export async function scanAll(dir, opts = {}) {
   const totals = newTotals()
-  for (const f of listTranscripts(dir)) await scanFile(f, totals, opts)
+  for (const f of listTranscripts(dir)) await scanFile(f, totals, { ...opts, root: dir })
   return totals
 }
 

@@ -25,8 +25,8 @@ jobs:
   analysis:
     name: Scorecard analysis
     runs-on: ubuntu-latest
-    # Scorecard only supports the default branch.
-    if: github.event.repository.default_branch == github.ref_name
+    # Scorecard only supports the default branch, and publishing results needs a public repository.
+    if: github.event.repository.default_branch == github.ref_name && github.event.repository.private == false
     permissions:
       contents: read # check out the repository while it is still private
       security-events: write # upload SARIF to code scanning

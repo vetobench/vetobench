@@ -17,15 +17,20 @@ npx vetobench
 
 ```
 vetobench 0.0.1: who approved your agent's actions
-1,744 transcripts · 2026-10-22 to 2026-11-20 · 237,578 of 237,951 tool calls carry a recorded decision
+1,744 transcripts · 2026-10-22 to 2026-11-20 · 236,734 of 237,087 tool calls carry a recorded decision
 
-  Static allow-rules (compound command)               117,297    49.4%
-  AI classifier                                        63,623    26.8%
-  Static allow-rule (single command)                   52,496    22.1%
+  Static allow-rules (compound command)                 116,860    49.4%
+  AI classifier                                          63,308    26.7%
+  Static allow-rule (single command)                     52,412    22.1%
   ...
-  You, through a permission prompt                         12   0.005%
+  You, through a permission prompt                           12   0.005%
 
-Static rules approved 72.7%, the AI classifier 26.8%, you 12 action(s).
+Static rules approved 72.7%, the AI classifier 26.7%, you 12 action(s).
+
+Where the agent was running:
+  Main sessions (interactive)     67,118    28.4%   rules 70.6% · classifier 28.1% · you 12
+  Loops (/loop, /goal)             5,880     2.5%   rules 73.4% · classifier 26.1% · you 0
+  Inside subagents               163,736    69.2%   rules 73.5% · classifier 26.2% · you 0
 ```
 
 ## Principles
@@ -38,10 +43,19 @@ Static rules approved 72.7%, the AI classifier 26.8%, you 12 action(s).
 ## Options
 
 ```
-npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--json]
+npx vetobench [transcripts-dir] [options]
+
+  --since / --until YYYY-MM-DD   window by UTC day (until is exclusive)
+  --rules FILE                   match approvals against this settings file's allow-rules instead of your
+                                 current ones (repeatable: use the settings that were in effect for the window)
+  --secrets                      also count passwords, keys and tokens left in your transcripts (slower)
+  --json                         aggregates as JSON (counts only)
+  --md / --share / --svg FILE    share formats, see below
+
+npx vetobench replay [transcripts-dir] [--since] [--until] [--policy FILE] [--json]
 ```
 
-The default directory is `~/.claude/projects`. Claude Code records a permission decision for each tool call from about v2.1.306 onward.
+The default directory is `~/.claude/projects`. Each tool call is counted once, even when a resumed session copied it into another transcript. Claude Code records a permission decision for each tool call from about v2.1.306 onward.
 
 ## Share your card
 

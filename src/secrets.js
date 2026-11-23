@@ -59,7 +59,7 @@ export function countSecrets(text) {
  * since/until are 'YYYY-MM-DD' (until exclusive), applied to the record's timestamp as in scanFile.
  */
 async function scanSecretsFile(path, t, { since = null, until = null } = {}) {
-  let found = false
+  const found = new Set() // categories seen in this transcript
   try {
     for await (const line of jsonlLines(path)) {
       if (line.slice(0, 120).includes('"api-request')) continue // the research scan's skip, kept so its counts replay
@@ -69,8 +69,8 @@ async function scanSecretsFile(path, t, { since = null, until = null } = {}) {
         const day = String(parseLine(line)?.timestamp || '').slice(0, 10)
         if ((since && day < since) || (until && day >= until)) continue
       }
-      found = true
       for (const [key, start, end] of spans) {
+        found.add(key)
         t.byCategory[key] += 1
         t.seen[key].add(createHash('sha256').update(line.slice(start, end)).digest('base64'))
       }
@@ -78,7 +78,8 @@ async function scanSecretsFile(path, t, { since = null, until = null } = {}) {
   } catch {
     // Unreadable file: keep what was counted, as the research scan did. Rethrowing would print the path.
   }
-  if (found) t.transcriptsWithSecrets += 1
+  if (found.size) t.transcriptsWithSecrets += 1
+  for (const key of found) t.transcriptsByCategory[key] += 1
 }
 
 /**
@@ -90,9 +91,10 @@ export async function scanSecrets(dir, opts = {}) {
   const t = {
     transcriptsWithSecrets: 0,
     byCategory: Object.fromEntries(keys.map((k) => [k, 0])),
+    transcriptsByCategory: Object.fromEntries(keys.map((k) => [k, 0])),
     seen: Object.fromEntries(keys.map((k) => [k, new Set()])),
   }
   for (const f of listTranscripts(dir)) await scanSecretsFile(f, t, opts)
   const distinctByCategory = Object.fromEntries(keys.map((k) => [k, t.seen[k].size]))
-  return { byCategory: t.byCategory, distinctByCategory, transcriptsWithSecrets: t.transcriptsWithSecrets }
+  return { byCategory: t.byCategory, distinctByCategory, transcriptsByCategory: t.transcriptsByCategory, transcriptsWithSecrets: t.transcriptsWithSecrets }
 }

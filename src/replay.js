@@ -651,49 +651,56 @@ export function parseLabels(text) {
 /** Replay every Bash tool call under dir against the policy. since/until are 'YYYY-MM-DD' (until exclusive), by the UTC day
  * of the tool call. A tool_use id seen twice (resumed sessions copy history) is counted once. */
 export async function scanReplay(dir, { since = null, until = null, policy = DEFAULT_POLICY, labels = null } = {}) {
-  const t = { files: 0, commands: 0, asks: 0, byCategory: {}, repeated: { commands: 0, asks: 0 }, ignored: 0, firstTs: null, lastTs: null }
+  const t = { files: 0, unreadable: 0, commands: 0, asks: 0, byCategory: {}, repeated: { commands: 0, asks: 0 }, ignored: 0, firstTs: null, lastTs: null }
   const lab = labels ? { entries: labels.size, matched: 0, right: 0, wrong: 0, unlabelled: 0, missed: 0 } : null
   const seen = new Map()
   for (const f of listTranscripts(dir)) {
     t.files += 1
-    for await (const line of jsonlLines(f)) {
-      // API-request records list every tool definition; they hold no tool calls of their own.
-      if (line.startsWith('{"type":"api-request') || !line.includes('"tool_use"') || !line.includes('"Bash"')) continue
-      const o = parseLine(line)
-      const content = o?.message?.content
-      if (!Array.isArray(content)) continue
-      const day = String(o.timestamp || '').slice(0, 10)
-      if ((since && day < since) || (until && day >= until)) continue
-      for (const b of content) {
-        if (!b || b.type !== 'tool_use' || b.name !== 'Bash') continue
-        const id = typeof b.id === 'string' && b.id ? b.id : null
-        if (id && seen.has(id)) {
-          t.repeated.commands += 1
-          if (seen.get(id)) t.repeated.asks += 1
-          continue
+    try {
+      for await (const line of jsonlLines(f)) {
+        // API-request records list every tool definition; they hold no tool calls of their own.
+        if (line.startsWith('{"type":"api-request') || !line.includes('"tool_use"') || !line.includes('"Bash"')) continue
+        const o = parseLine(line)
+        const content = o?.message?.content
+        if (!Array.isArray(content)) continue
+        const day = String(o.timestamp || '').slice(0, 10)
+        if ((since && day < since) || (until && day >= until)) continue
+        for (const b of content) {
+          if (!b || b.type !== 'tool_use' || b.name !== 'Bash') continue
+          const id = typeof b.id === 'string' && b.id ? b.id : null
+          if (id && seen.has(id)) {
+            t.repeated.commands += 1
+            if (seen.get(id)) t.repeated.asks += 1
+            continue
+          }
+          const cmd = String(b.input?.command ?? '')
+          if (policy.ignore.some((rx) => rx.test(cmd))) {
+            t.ignored += 1
+            if (id) seen.set(id, false)
+            continue
+          }
+          t.commands += 1
+          if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+            if (!t.firstTs || day < t.firstTs) t.firstTs = day
+            if (!t.lastTs || day > t.lastTs) t.lastTs = day
+          }
+          const hits = askCategories(cmd, policy)
+          for (const h of hits) t.byCategory[h] = (t.byCategory[h] || 0) + 1
+          const asked = hits.length > 0
+          if (asked) t.asks += 1
+          if (id) seen.set(id, asked)
+          if (!lab) continue
+          const verdict = id ? labels.get(id) : undefined
+          if (verdict) lab.matched += 1
+          if (asked && verdict === 'ask') lab.right += 1
+          else if (asked && verdict === 'allow') lab.wrong += 1
+          else if (asked) lab.unlabelled += 1
+          else if (verdict === 'ask') lab.missed += 1
         }
-        const cmd = String(b.input?.command ?? '')
-        if (policy.ignore.some((rx) => rx.test(cmd))) {
-          t.ignored += 1
-          if (id) seen.set(id, false)
-          continue
-        }
-        t.commands += 1
-        if (day && (!t.firstTs || day < t.firstTs)) t.firstTs = day
-        if (day && (!t.lastTs || day > t.lastTs)) t.lastTs = day
-        const hits = askCategories(cmd, policy)
-        for (const h of hits) t.byCategory[h] = (t.byCategory[h] || 0) + 1
-        const asked = hits.length > 0
-        if (asked) t.asks += 1
-        if (id) seen.set(id, asked)
-        if (!lab) continue
-        const verdict = id ? labels.get(id) : undefined
-        if (verdict) lab.matched += 1
-        if (asked && verdict === 'ask') lab.right += 1
-        else if (asked && verdict === 'allow') lab.wrong += 1
-        else if (asked) lab.unlabelled += 1
-        else if (verdict === 'ask') lab.missed += 1
       }
+    } catch {
+      // Unreadable or vanished file: skip it and keep the counts so far. Never rethrow: the message carries the path.
+      t.unreadable += 1
     }
   }
   if (lab) t.labels = lab
@@ -802,9 +809,9 @@ export async function replayCommand(argv, { version, defaultDir }) {
   const labels = o.labels ? parseLabels(readFlagFile(o.labels, '--labels')) : null
   const t = await scanReplay(o.dir, { since: o.since, until: o.until, policy, labels })
   if (!o.json) return renderReplay(t, policy, version, Boolean(o.policy))
-  const { files, commands, firstTs, lastTs, asks, repeated, ignored } = t
+  const { files, unreadable, commands, firstTs, lastTs, asks, repeated, ignored } = t
   // Display order, not scan order, so two runs on the same corpus diff cleanly.
   const byCategory = Object.fromEntries(CATEGORIES.filter(([k]) => t.byCategory[k]).map(([k]) => [k, t.byCategory[k]]))
-  return JSON.stringify({ vetobench: version, replay: { files, commands, firstTs, lastTs, asks, byCategory, repeated, ignored,
+  return JSON.stringify({ vetobench: version, replay: { files, unreadable, commands, firstTs, lastTs, asks, byCategory, repeated, ignored,
     policy: { file: Boolean(o.policy), ...policy.summary }, ...(t.labels ? { labels: t.labels } : {}) } }, null, 2)
 }

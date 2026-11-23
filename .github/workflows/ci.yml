@@ -22,5 +22,14 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Tests (includes the static no-network check)
         run: node --test
-      - name: Run the CLI with networking switched off
-        run: unshare --user --net node bin/vetobench.js test/fixtures/projects
+      - name: Run every CLI mode with networking switched off
+        run: |
+          set -e
+          offline() { unshare --user --net "$@"; }
+          offline node bin/vetobench.js test/fixtures/projects
+          offline node bin/vetobench.js test/fixtures/shapes --json
+          offline node bin/vetobench.js test/fixtures/shapes --md
+          offline node bin/vetobench.js test/fixtures/shapes --share
+          offline node bin/vetobench.js test/fixtures/shapes --svg "$RUNNER_TEMP/card.svg"
+          offline node bin/vetobench.js test/fixtures/secrets --secrets
+          offline node bin/vetobench.js replay test/fixtures/replay --json
