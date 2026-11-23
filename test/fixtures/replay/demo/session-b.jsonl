@@ -1,0 +1,5 @@
+{"type":"assistant","timestamp":"2026-11-04T10:01:00.000Z","sessionId":"demo-b","message":{"role":"assistant","content":[{"type":"tool_use","id":"r2","name":"Bash","input":{"command":"git push origin main"}}]}}
+{"type":"assistant","timestamp":"2026-11-07T15:00:00.000Z","sessionId":"demo-b","message":{"role":"assistant","content":[{"type":"tool_use","id":"r12","name":"Bash","input":{"command":"kubectl --context prod-eu delete deploy web"}}]}}
+{"type":"assistant","timestamp":"2026-11-07T15:01:00.000Z","sessionId":"demo-b","message":{"role":"assistant","content":[{"type":"tool_use","id":"r13","name":"Bash","input":{"command":"npm publish --dry-run"}}]}}
+{"type":"assistant","timestamp":"2026-11-07T15:02:00.000Z","sessionId":"demo-b","message":{"role":"assistant","content":[{"type":"tool_use","id":"r14","name":"Bash","input":{"command":"scp dist.tgz app.example.internal:/srv/releases/"}}]}}
+{"type":"assistant","timestamp":"2026-11-07T15:03:00.000Z","sessionId":"demo-b","message":{"role":"assistant","content":[{"type":"tool_use","id":"r15","name":"Bash","input":{"command":"psql \"postgresql:\/\/db.example.internal/app\" -c \"UPDATE users SET plan = 'pro'\""}}]}}
