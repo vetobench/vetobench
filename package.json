@@ -1,0 +1,36 @@
+{
+  "name": "vetobench",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Who approved your coding agent's actions? A local, zero-network report from your agent transcripts, and an open benchmark of permission guards.",
+  "type": "module",
+  "bin": {
+    "vetobench": "bin/vetobench.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE",
+    "METHODOLOGY.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "claude-code",
+    "ai-agents",
+    "permissions",
+    "security",
+    "benchmark",
+    "coding-agents"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vetobench/vetobench.git"
+  },
+  "license": "Apache-2.0"
+}

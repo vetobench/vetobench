@@ -1,0 +1,9 @@
+node_modules/
+*.jsonl
+!test/fixtures/**/*.jsonl
+labels/
+corpus/
+*.pkl
+.env
+.env.*
+.DS_Store
