@@ -6,6 +6,7 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { GATES, SHAPES, scanAll, auditSettings } from '../src/analyze.js'
 import { renderMarkdown, renderShare, renderSvg } from '../src/render.js'
 import { loadAllowRules, attributeCommand } from '../src/attribution.js'
+import { SECRET_CATEGORIES, scanSecrets } from '../src/secrets.js'
 
 const VERSION = '0.0.1'
 const HELP = `vetobench ${VERSION}: who approved your coding agent's actions?
@@ -20,6 +21,7 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
   --md              the card as markdown, to paste into an issue or a post
   --share           the markdown card, then a link to a prefilled GitHub issue (you open it)
   --svg FILE        also write the card as a 1200x630 SVG image; --force replaces FILE
+  --secrets         also count passwords, keys and tokens left in the transcripts (reads every line: slower)
 
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
@@ -38,6 +40,7 @@ function parseArgs(argv) {
       if (!argv[i + 1]) throw new Error('--rules needs a settings file')
       o.rules.push(argv[++i])
     }
+    else if (a === '--secrets') o.secrets = true
     else if (a === '-h' || a === '--help') o.help = true
     else if (a === '--version') o.version = true
     else if (!a.startsWith('-')) o.dir = a
@@ -72,6 +75,7 @@ function render(t, rules) {
   lines.push('')
   if (!d) {
     lines.push('No recorded permission decisions found. Claude Code records them from about v2.1.306 onward.')
+    lines.push(...secretLines(t.secrets, t.files))
     return lines.join('\n')
   }
   const width = Math.max(...GATES.map(([, label]) => label.length))
@@ -105,9 +109,23 @@ function render(t, rules) {
     lines.push(`Your allow-rules now: ${num(rules.allow)} allow · ${num(rules.deny)} deny · ${num(rules.ask)} ask · ` +
       `${num(rules.wildcard)} wildcard interpreter/remote rule(s) · ${num(rules.secret)} with a secret inline`)
   }
+  lines.push(...secretLines(t.secrets, t.files))
   lines.push('')
   lines.push('Not counted: approvals you give in chat. Nothing left this machine.')
   return lines.join('\n')
+}
+
+// Counts per fixed category, never values. Without --secrets, one line says how to get them.
+function secretLines(s, files) {
+  if (!s) return ['', 'Run with --secrets to also count passwords, keys and tokens left in your transcripts.']
+  const rows = SECRET_CATEGORIES.filter(([k]) => s.byCategory[k])
+  if (!rows.length) return ['', 'Secrets left in your transcripts: none of the known shapes found.']
+  const sum = (o) => Object.values(o).reduce((a, b) => a + b, 0)
+  const w = Math.max(...rows.map(([, label]) => label.length))
+  return ['', `Secrets left in your transcripts: ${num(sum(s.byCategory))} occurrence(s) of ${num(sum(s.distinctByCategory))} distinct ` +
+    `value(s), in ${num(s.transcriptsWithSecrets)} of ${num(files)} transcripts`,
+  ...rows.map(([k, label]) => `  ${label.padEnd(w)}  ${num(s.byCategory[k]).padStart(9)}  ${num(s.distinctByCategory[k]).padStart(7)} distinct`),
+  'These sit in plain text in ~/.claude/projects. Consider rotating them and lowering cleanupPeriodDays.']
 }
 
 const SVG_EXISTS = 'the --svg file already exists; pass --force to replace it'
@@ -137,14 +155,16 @@ async function main() {
   const allow = loadAllowRules(o.rules.length ? o.rules : settings.filter((p) => existsSync(p)))
   if (o.rules.length && allow.unreadable) throw new Error(`--rules: ${allow.unreadable} of ${o.rules.length} file(s) could not be read as JSON`)
   const totals = await scanAll(o.dir, { since: o.since, until: o.until, attribute: (c) => attributeCommand(c, allow.rules) })
+  if (o.secrets) totals.secrets = await scanSecrets(o.dir, { since: o.since, until: o.until }) // the md/share cards read it too
   const rules = auditSettings(settings)
   if (o.svg) writeSvg(o.svg, renderSvg(totals, { version: VERSION }), o.force)
   if (o.md) return console.log(renderMarkdown(totals, rules, { version: VERSION }))
   if (o.share) return console.log(renderShare(totals, rules, { version: VERSION }))
   if (o.json) {
-    const { files, toolResults, withDecision, gates, humanByTool, firstTs, lastTs, byShape, shapeFiles } = totals
+    const { files, toolResults, withDecision, gates, humanByTool, firstTs, lastTs, byShape, shapeFiles, secrets } = totals
     const wildcard = { ...totals.wildcard, rules: allow.rules.length }
-    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules, wildcard }, null, 2))
+    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules, wildcard,
+      ...(secrets && { secrets }) }, null, 2))
   }
   console.log(render(totals, rules))
 }

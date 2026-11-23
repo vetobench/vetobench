@@ -186,14 +186,30 @@ export async function scanAll(dir, opts = {}) {
 export const BROAD = new Set(['python', 'python3', 'python3.10', 'bash', 'sh', 'zsh', 'node', 'npx', 'bunx', 'bunx tsx', 'perl',
   'ruby', 'curl', 'wget', 'ssh', 'scp', 'rsync', 'docker', 'git', 'gh', 'env', 'export', 'xargs', 'bun', 'npm', 'pip', 'pip3',
   'brew', 'sudo', 'eval'])
-const SECRET = [
-  /PGPASSWORD=\S+/,
-  /(postgres(ql)?|mysql|redis|mongodb(\+srv)?):\/\/[^:\s/"']+:[^@\s"']{4,}@/,
-  /\b(sk-ant-|sk-proj-|sk_live_|pk_live_|ghp_|gho_|github_pat_|xox[abp]-|AKIA)[A-Za-z0-9_-]{8,}/,
-  /eyJ[A-Za-z0-9_-]{10,}\.eyJ/,
-  /\b[A-Z0-9_]*(SECRET|PASSWORD|API_KEY|PRIVATE_KEY|_PK|TOKEN)[A-Z0-9_]*=["']?[A-Za-z0-9+/_-]{12,}/,
-  /BEGIN [A-Z ]*PRIVATE KEY/,
+// A word start, or right after an escaped \n, \r or \t: in a raw JSONL line, "\nTOKEN=" has no \b before TOKEN.
+const atWord = (rx) => new RegExp(String.raw`(?<=^|\W|\\[nrt])` + rx.source, rx.flags)
+/**
+ * Secret shapes: [category, label, pattern]. One table for the settings audit and the transcript scan (src/secrets.js).
+ * Order is priority: where two shapes overlap (OPENAI_API_KEY=sk-...), the transcript scan counts only the first.
+ * postgres-url and private-key are the research scan's patterns unchanged, so its counts replay; the rest extend it.
+ * The optional backslash before a quote lets a value match inside a raw JSONL line, where quotes are escaped.
+ */
+export const SECRET_PATTERNS = [
+  ['postgres-url', 'Postgres URL with a password', /postgres(?:ql)?:\/\/[^:\s/"']+:[^@\s"']{6,}@/],
+  ['db-url', 'Other database URL with a password', atWord(/(?:mysql|mariadb|rediss?|mongodb(?:\+srv)?|amqps?):\/\/[^:\s/"']*:[^@\s"']{6,}@/)],
+  ['pgpassword', 'PGPASSWORD= value', atWord(/PGPASSWORD=(?:\\?["'])?[^\s"'\\$<>{}()*`;&|]{4,}/)],
+  ['private-key', 'Private-key block', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+  ['anthropic-key', 'Anthropic API key', /sk-ant-[A-Za-z0-9_-]{20,}/],
+  ['openai-key', 'OpenAI-style API key (sk-)', atWord(/sk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{30,}/)],
+  ['github-token', 'GitHub token', atWord(/(?:ghp|gho|ghs|ghu|ghr|github_pat)_[A-Za-z0-9_]{20,}/)],
+  ['aws-key', 'AWS access key ID', atWord(/(?:AKIA|ASIA)[0-9A-Z]{16}\b/)],
+  ['slack-token', 'Slack token', atWord(/xox[abprs]-[A-Za-z0-9-]{10,}/)],
+  ['stripe-key', 'Stripe secret key', atWord(/[rs]k_(?:live|test)_[A-Za-z0-9]{10,}/)],
+  ['jwt', 'JWT', atWord(/eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/)],
+  ['assignment', 'Other *_SECRET / *_TOKEN / *_PASSWORD = value',
+    atWord(/[A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_KEY|PRIVATE_KEY|_PK|MNEMONIC)[A-Z0-9_]*\s*=\s*(?:\\?["'])?(?!\/)[A-Za-z0-9+/_-]{12,}/)],
 ]
+const SECRET = SECRET_PATTERNS.map(([, , rx]) => rx)
 
 /** Lint permission settings files. Returns counts only, never rule bodies. */
 export function auditSettings(paths) {
