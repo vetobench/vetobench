@@ -50,6 +50,19 @@ const sum = (rows) => rows.reduce((s, [, n]) => s + n, 0)
 const cell = (s) => String(s).replace(/\|/g, '\\|')
 const row = (cells) => `| ${cells.map(cell).join(' | ')} |`
 
+/**
+ * "612 of 850 shell allow-rules never approved a command in this window.", or null when no shell rule was checked.
+ * u is { shellRules, unused, from }: from 'rules' when the rules came from --rules files.
+ */
+export function unusedLine(u) {
+  if (!u || typeof u !== 'object') return null
+  const total = Number(u.shellRules) || 0
+  if (total <= 0) return null
+  const unused = Math.min(Math.max(Number(u.unused) || 0, 0), total)
+  return `${num(unused)} of ${num(total)} shell allow-rule${total === 1 ? '' : 's'}${u.from === 'rules' ? ' in the --rules files' : ''} ` +
+    'never approved a command in this window.'
+}
+
 /** The card as GitHub-flavoured markdown. rules is auditSettings() output. */
 export function renderMarkdown(t, rules = {}, { version } = {}) {
   const h = headline(t)
@@ -75,9 +88,11 @@ export function renderMarkdown(t, rules = {}, { version } = {}) {
     shapes(t, d, out)
   }
   if (rules.files) {
-    out.push('', `**Allow-rules now:** ${num(rules.allow)} allow · ${num(rules.deny)} deny · ${num(rules.ask)} ask · ` +
-      `${num(rules.wildcard)} wildcard interpreter/remote rule(s) · ${num(rules.secret)} with a secret inline`)
+    out.push('', `**Allow-rules now:** ${num(rules.allow)} allow in ${num(rules.files)} settings file(s) · ${num(rules.deny)} deny · ` +
+      `${num(rules.ask)} ask · ${num(rules.wildcard)} wildcard interpreter/remote rule(s) · ${num(rules.secret)} with a secret inline`)
   }
+  const unused = unusedLine(t.ruleUse)
+  if (unused) out.push('', `**Unused rules:** ${unused}`)
   // The lower of the two matchings (plain prefix, word boundary) is the honest "at least".
   const wcAtLeast = t.wildcard && typeof t.wildcard === 'object'
     ? Math.min(Number(t.wildcard.actions) || 0, Number(t.wildcard.wordBoundary ?? t.wildcard.actions) || 0) : 0

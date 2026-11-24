@@ -4,8 +4,9 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { existsSync, statSync, writeFileSync } from 'node:fs'
 import { GATES, SHAPES, scanAll, auditSettings } from '../src/analyze.js'
-import { renderMarkdown, renderShare, renderSvg } from '../src/render.js'
+import { renderMarkdown, renderShare, renderSvg, unusedLine } from '../src/render.js'
 import { loadAllowRules, attributeCommand } from '../src/attribution.js'
+import { ruleScopes } from '../src/settings.js'
 import { SECRET_CATEGORIES, scanSecrets } from '../src/secrets.js'
 import { replayCommand } from '../src/replay.js'
 
@@ -118,11 +119,13 @@ function render(t, rules) {
         `rules ${pct(st, s.withDecision)} · classifier ${pct(sg('classifier'), s.withDecision)} · you ${num(sg('human'))}`)
     }
   }
+  const unused = unusedLine(t.ruleUse)
+  if (rules.files || unused) lines.push('')
   if (rules.files) {
-    lines.push('')
-    lines.push(`Your allow-rules now: ${num(rules.allow)} allow · ${num(rules.deny)} deny · ${num(rules.ask)} ask · ` +
-      `${num(rules.wildcard)} wildcard interpreter/remote rule(s) · ${num(rules.secret)} with a secret inline`)
+    lines.push(`Your allow-rules now: ${num(rules.allow)} allow in ${num(rules.files)} settings file(s) · ${num(rules.deny)} deny · ` +
+      `${num(rules.ask)} ask · ${num(rules.wildcard)} wildcard interpreter/remote rule(s) · ${num(rules.secret)} with a secret inline`)
   }
+  if (unused) lines.push(unused)
   lines.push(...secretLines(t.secrets, t.files))
   lines.push('')
   lines.push('Not counted: approvals you give in chat. Nothing left this machine.')
@@ -163,24 +166,28 @@ async function main() {
   if (o.version) return console.log(VERSION)
   if (!existsSync(o.dir) || !statSync(o.dir).isDirectory()) throw new Error(`no transcripts directory at ${o.dir}`)
   if (o.svg && !o.force && existsSync(o.svg)) throw new Error(SVG_EXISTS) // fail before a long scan
-  const settings = [
-    join(homedir(), '.claude', 'settings.json'),
-    join(process.cwd(), '.claude', 'settings.json'),
-    join(process.cwd(), '.claude', 'settings.local.json'),
-  ]
-  // The path is not echoed: settings file names can carry project names.
-  const allow = loadAllowRules(o.rules.length ? o.rules : settings.filter((p) => existsSync(p)))
-  if (o.rules.length && allow.unreadable) throw new Error(`--rules: ${allow.unreadable} of ${o.rules.length} file(s) could not be read as JSON`)
-  const totals = await scanAll(o.dir, { since: o.since, until: o.until, attribute: (c) => attributeCommand(c, allow.rules) })
+  // Current settings: the global file, the files of this folder, and the files of every project a counted session ran in
+  // (found from the folder each transcript records). Paths are never echoed: folder names can carry project names.
+  const scopes = ruleScopes({ home: homedir(), fallback: process.cwd(), load: loadAllowRules })
+  const given = o.rules.length ? loadAllowRules(o.rules) : null
+  if (given && given.unreadable) throw new Error(`--rules: ${given.unreadable} of ${o.rules.length} file(s) could not be read as JSON`)
+  // A session's commands are matched against the rules in effect for it: global plus its own project's, or the
+  // --rules files pooled. used collects every rule that matched, to count the ones that never approved anything.
+  const used = new Set()
+  const attribute = given ? (c) => attributeCommand(c, given.rules, used) : (c, cwd) => attributeCommand(c, scopes.rulesFor(cwd), used)
+  const totals = await scanAll(o.dir, { since: o.since, until: o.until, attribute })
+  for (const cwd of totals.state.cwds) scopes.rulesFor(cwd) // also read projects that had no rule-approved shell command
+  const shell = given ? given.rules : scopes.rules()
+  totals.ruleUse = { shellRules: shell.length, unused: shell.filter((r) => !used.has(r)).length, from: given ? 'rules' : 'settings' }
   if (o.secrets) totals.secrets = await scanSecrets(o.dir, { since: o.since, until: o.until }) // the md/share cards read it too
-  const rules = auditSettings(settings)
+  const rules = auditSettings(scopes.files())
   if (o.svg) writeSvg(o.svg, renderSvg(totals, { version: VERSION }), o.force)
   if (o.md) return console.log(renderMarkdown(totals, rules, { version: VERSION }))
   if (o.share) return console.log(renderShare(totals, rules, { version: VERSION }))
   if (o.json) {
-    const { files, toolResults, withDecision, repeats, gates, humanByTool, firstTs, lastTs, byShape, shapeFiles, secrets } = totals
-    const wildcard = { ...totals.wildcard, rules: allow.rules.length }
-    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, repeats, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules, wildcard,
+    const { files, toolResults, withDecision, repeats, gates, humanByTool, firstTs, lastTs, byShape, shapeFiles, secrets, ruleUse } = totals
+    const wildcard = { ...totals.wildcard, rules: shell.length }
+    return console.log(JSON.stringify({ vetobench: VERSION, files, toolResults, withDecision, repeats, firstTs, lastTs, gates, humanByTool, byShape, shapeFiles, rules, ruleUse, wildcard,
       ...(secrets && { secrets }) }, null, 2))
   }
   console.log(render(totals, rules))

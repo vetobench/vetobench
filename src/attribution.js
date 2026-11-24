@@ -50,8 +50,11 @@ const SPECIFIC = Symbol('specific')
 // longest prefix names the family (python3 over python).
 const better = (a, b) => (a === SPECIFIC || b === SPECIFIC ? SPECIFIC : !a || b.length > a.length ? b : a)
 
-/** One part of a command to [plain-prefix result, word-boundary result]: null, SPECIFIC or a family. */
-function matchPart(part, rules) {
+/**
+ * One part of a command to [plain-prefix result, word-boundary result]: null, SPECIFIC or a family. With a used Set,
+ * every rule that Claude Code would match on this part (word boundary applied) is added to it.
+ */
+function matchPart(part, rules, used) {
   const s = strip(part).replace(ENV, '')
   if (!s || s.startsWith('#')) return null
   let plain = null
@@ -60,8 +63,11 @@ function matchPart(part, rules) {
     if (r.prefix ? !s.startsWith(r.body) : s !== r.body) continue
     const hit = r.prefix && BROAD.has(r.body) ? r.body : SPECIFIC
     plain = better(plain, hit)
-    if (!r.boundary || s === r.body || s.startsWith(r.body + ' ')) bounded = better(bounded, hit)
-    if (plain === SPECIFIC && bounded === SPECIFIC) break
+    if (!r.boundary || s === r.body || s.startsWith(r.body + ' ')) {
+      bounded = better(bounded, hit)
+      if (used) used.add(r)
+    }
+    if (plain === SPECIFIC && bounded === SPECIFIC && !used) break
   }
   return [plain, bounded]
 }
@@ -69,13 +75,14 @@ function matchPart(part, rules) {
 /**
  * Attribute one static-approved shell command. families: the wildcard families it relied on (a part matched only
  * wildcard rules), by plain string prefix as in the original analysis. wordBoundary: the same verdict with Claude
- * Code's word boundary applied to `:*` and ` *` rules.
+ * Code's word boundary applied to `:*` and ` *` rules. used: optional Set that collects the rules that matched (see
+ * matchPart), to count allow-rules that never approved anything.
  */
-export function attributeCommand(command, rules) {
+export function attributeCommand(command, rules, used = null) {
   const families = new Set()
   let wordBoundary = false
   for (const part of String(command).replace(HEREDOC, '<<HEREDOC').split(SPLIT)) {
-    const m = matchPart(part, rules)
+    const m = matchPart(part, rules, used)
     if (!m) continue
     if (m[0] && m[0] !== SPECIFIC) families.add(m[0])
     if (m[1] && m[1] !== SPECIFIC) wordBoundary = true

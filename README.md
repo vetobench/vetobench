@@ -55,7 +55,7 @@ npx vetobench [transcripts-dir] [options]
 npx vetobench replay [transcripts-dir] [--since] [--until] [--policy FILE] [--json]
 ```
 
-The default directory is `~/.claude/projects`. Each tool call is counted once, even when a resumed session copied it into another transcript. Claude Code records a permission decision for each tool call from about v2.1.306 onward.
+The default directory is `~/.claude/projects`. Each tool call is counted once, even when a resumed session copied it into another transcript. The card also audits your allow-rules: it reads your global settings and those of every project your sessions ran in, and counts the shell rules that never approved a command in the window. Claude Code records a permission decision for each tool call from about v2.1.306 onward.
 
 ## Share your card
 

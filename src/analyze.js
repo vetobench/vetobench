@@ -1,6 +1,6 @@
 // vetobench analysis: pure, local, zero-network. Reads agent transcripts and returns aggregates only.
 import { createReadStream, readdirSync, statSync, readFileSync, existsSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 
 /**
  * JSONL lines split on "\n" only. node:readline also breaks on U+2028/U+2029, which are legal inside
@@ -99,11 +99,12 @@ function newTotals() {
 
 // Cross-file state, keyed by tool_use id: tool names, Bash commands awaiting their result, and the ids already counted.
 // Shared across files because a resumed or forked session can put a tool call and a copy of its result in different
-// transcripts. Non-enumerable, so none of it can reach --json or a renderer.
+// transcripts. cwds: the working folders of counted decisions, used only to find each project's settings files.
+// Non-enumerable, so none of it can reach --json or a renderer.
 function withState(totals) {
   if (!totals.state) {
     Object.defineProperty(totals, 'state', { enumerable: false,
-      value: { toolNames: new Map(), commands: new Map(), results: new Set(), decided: new Set() } })
+      value: { toolNames: new Map(), commands: new Map(), results: new Set(), decided: new Set(), cwds: new Set(), launch: new Map() } })
   }
   return totals
 }
@@ -118,6 +119,30 @@ export const toolLabel = (name) => BUILTIN_TOOLS.has(name) ? name : String(name 
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/
 
+// Claude Code names each folder under ~/.claude/projects after the folder a session was launched from, with every
+// character other than a letter or digit replaced by '-'.
+const encodeDir = (p) => p.replace(/[^A-Za-z0-9]/g, '-')
+
+/**
+ * The folder a record's session was launched from: the nearest folder at or above the record's cwd whose encoding is
+ * the transcript folder's name (a subagent working in a worktree still runs under its session's settings). Falls back
+ * to the cwd itself. Cached per (transcript folder, cwd); paths stay in memory.
+ */
+function sessionDir(cwd, folder, cache) {
+  if (typeof cwd !== 'string' || !cwd) return undefined
+  if (!folder) return cwd
+  const k = folder + '\0' + cwd
+  if (!cache.has(k)) {
+    let found = cwd
+    for (let d = cwd; ; d = dirname(d)) {
+      if (encodeDir(d) === folder) { found = d; break }
+      if (dirname(d) === d) break
+    }
+    cache.set(k, found)
+  }
+  return cache.get(k)
+}
+
 function addShape(totals, shape, gate, n = 1) {
   const s = totals.byShape[shape]
   s.withDecision += n
@@ -129,12 +154,15 @@ const textOf = (content) => typeof content === 'string' ? content
 
 /**
  * Scan one transcript file into totals (mutates totals). since/until are 'YYYY-MM-DD' strings (until exclusive).
- * attribute(command) -> { families, wordBoundary } is called for each static-approved Bash command (see attribution.js).
+ * attribute(command, dir) -> { families, wordBoundary } is called for each static-approved Bash command (see
+ * attribution.js); dir is the folder the record's session was launched from (sessionDir), or undefined.
  */
 export async function scanFile(path, totals, { since = null, until = null, attribute = null, root = null } = {}) {
-  const { toolNames, commands, results, decided } = withState(totals).state
+  const { toolNames, commands, results, decided, cwds, launch } = withState(totals).state
   // Only path segments below the scanned directory count, so a parent folder named "subagents" changes nothing.
-  const isSubagentFile = (root ? relative(root, path) : path).split(sep).includes('subagents')
+  const below = (root ? relative(root, path) : path).split(sep)
+  const isSubagentFile = below.includes('subagents')
+  const folder = root && below.length > 1 ? below[0] : null // the transcript folder that names the launch folder
   const mainGates = {} // main-thread decisions; their shape (interactive or loop) is known only after the whole file
   let ranLoop = false
   totals.files += 1
@@ -199,6 +227,8 @@ export async function scanFile(path, totals, { since = null, until = null, attri
         const command = commands.get(id)
         commands.delete(id) // held only until its decision is counted
         totals.withDecision += 1
+        const dir = sessionDir(o.cwd, folder, launch)
+        if (dir) cwds.add(dir)
         if (o.version) totals.versions[o.version] = (totals.versions[o.version] || 0) + 1
         const tool = toolNames.get(id) || 'unknown'
         const gate = gateOf(pd, tool)
@@ -208,7 +238,7 @@ export async function scanFile(path, totals, { since = null, until = null, attri
         else mainGates[gate] = (mainGates[gate] || 0) + 1
         if (attribute && (gate === 'rule' || gate === 'rules-compound') && tool === 'Bash' && command && typeof command === 'string') {
           const w = totals.wildcard
-          const { families, wordBoundary } = attribute(command)
+          const { families, wordBoundary } = attribute(command, dir)
           w.examined += 1
           if (families.length) w.actions += 1
           if (wordBoundary) w.wordBoundary += 1

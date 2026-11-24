@@ -38,7 +38,7 @@ Tool definitions inside API-request records are ignored: they list every tool, s
 Which allow-rule approved a shell command is not recorded, so vetobench reconstructs it. The method is a port of the analysis behind CLAIMS #4, kept exact so that number can be replayed.
 
 - **Examined:** Bash calls whose gate is a static allow-rule (single or compound). The command is read from the matching tool call, matched in memory and dropped. Only counts and the fixed family names are kept.
-- **Rules:** `Bash(...)` entries in `permissions.allow`. By default these come from the same files as the rules line: `~/.claude/settings.json`, plus `.claude/settings.json` and `.claude/settings.local.json` in the current directory. `--rules FILE` (repeatable) uses the given files instead, so you can pass the settings that were in effect. Rules from all files are pooled and applied to every transcript.
+- **Rules:** `Bash(...)` entries in `permissions.allow`. By default each command is matched against the rules in effect for its session: `~/.claude/settings.json`, plus `.claude/settings.json` and `.claude/settings.local.json` of the session's project (see [Settings files](#settings-files)). `--rules FILE` (repeatable) uses the given files instead, so you can pass the settings that were in effect. Those are pooled and applied to every transcript.
 - **Splitting:** heredoc bodies are removed, then the command is split on `&&`, `||`, `;`, `|` and newlines. The split ignores quotes. Leading `VAR=value` assignments are stripped, and empty or comment parts are skipped.
 - **Matching:** `x:*`, `x *` and `x*` are prefix rules, compared as plain string prefixes. Other rules must match exactly. A prefix rule is a **wildcard interpreter/remote rule** when its prefix is one of the fixed names in `BROAD` (`src/analyze.js`: `python3`, `bash`, `node`, `ssh`, `curl`, `git`, …).
 - **Relied on a wildcard:** at least one part matched a wildcard rule and no other rule. The family is that rule's prefix, or the longest one if several match. An action that relied on two families counts under both, so the family counts can add up to more than the total.
@@ -59,6 +59,24 @@ With `--secrets`, vetobench also counts secret-shaped strings in every transcrip
 - **Unit: occurrences**, as in the research scan behind the claims ledger: every match in the raw JSONL line counts. The same value counts each time it is written, and Claude Code often stores a tool's output twice in one record, so occurrences overstate how many secrets there are. The card therefore also reports **distinct values**: distinct matched strings, counted through SHA-256 digests that stay in memory during the run and are then dropped. Values and digests are never printed or written.
 - **Window:** `--since` / `--until` apply to each record's timestamp. Records without one (session summaries) drop out once `--since` is set.
 - **Shapes, not verified secrets.** Placeholders and documented example keys count. Secrets in other formats (lowercase names, `password:` in YAML) are missed. This is a heuristic, not a security scan.
+
+## Settings files
+
+The rules line ("Your allow-rules now") and wildcard attribution read your current settings files:
+
+- **Global:** `~/.claude/settings.json`.
+- **Projects:** `.claude/settings.json` and `.claude/settings.local.json` of every project a counted session ran in, and of the folder you run vetobench from.
+- **Which project a session belongs to:** Claude Code names each folder under `~/.claude/projects` after the folder the session was launched from, with every character other than a letter or digit replaced by `-`. Each record carries its working folder (`cwd`). vetobench takes the nearest folder at or above the record's `cwd` whose encoding matches the transcript folder, so a subagent working in a worktree counts under the project it was launched from. If none matches, it uses the record's own `cwd`. From there it takes the nearest folder with project settings, stopping below your home folder. A record without a `cwd` gets the rules of the folder vetobench runs in.
+- Each file is read once and counted once. Folder names and paths stay in memory and are never printed; the card shows only how many files were read.
+
+### Unused rules
+
+"N of M shell allow-rules never approved a command in this window": M counts the `Bash(...)` allow-rules in those files, and N the ones that matched no part of any static-approved shell command in the window.
+
+- A rule only counts as used by sessions it applied to: global rules by every session, project rules by their own project's sessions.
+- "Matched" uses Claude Code's semantics: `x:*` and `x *` at a word boundary, `x*` as a plain prefix, anything else exactly. When several rules match a part, all of them count as used.
+- Other rules (`Read`, `WebFetch(domain:…)`, MCP tools) are not checked, so they are not in M.
+- The count is for your *current* rules against past commands, so a rule added recently has had less time to match. With `--rules`, the count covers the given files, pooled.
 
 ## Known limits
 

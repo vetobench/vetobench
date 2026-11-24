@@ -30,6 +30,7 @@ function bigTotals() {
     },
     wildcard: { actions: 1234, byFamily: { python3: 1000, ssh: 200, node: 34 } },
     secrets: { byCategory: { 'database-url': 12, 'api-key': 3 }, transcriptsWithSecrets: 4 },
+    ruleUse: { shellRules: 40, unused: 12, from: 'settings' },
   }
 }
 const RULES = { files: 1, allow: 50, deny: 1, ask: 0, wildcard: 3, secret: 1 }
@@ -49,7 +50,8 @@ test('markdown card: gates table, headline numbers, shapes, rules, wildcard and 
   assert.ok(lines.includes('| Main sessions (interactive) | 3,000 | 30.0% | 50.0% | 33.3% | 5 |'))
   assert.ok(lines.includes('| Inside subagents | 7,000 | 70.0% | 57.1% | 24.3% | 0 |'))
   assert.ok(!lines.some((l) => l.startsWith('| Loops')), 'shapes without decisions are skipped')
-  assert.ok(lines.includes('**Allow-rules now:** 50 allow · 1 deny · 0 ask · 3 wildcard interpreter/remote rule(s) · 1 with a secret inline'))
+  assert.ok(lines.includes('**Allow-rules now:** 50 allow in 1 settings file(s) · 1 deny · 0 ask · 3 wildcard interpreter/remote rule(s) · 1 with a secret inline'))
+  assert.ok(lines.includes('**Unused rules:** 12 of 40 shell allow-rules never approved a command in this window.'))
   assert.ok(lines.includes('**Wildcard reliance:** at least 1,234 static-approved shell action(s) relied on a wildcard interpreter/remote rule (python3 1,000 · ssh 200 · node 34)'))
   assert.ok(lines.includes('**Secrets in plaintext transcripts:** 15 across 4 transcript(s) (database-url 12 · api-key 3)'))
   assert.equal(lines.at(-1), '_Counts only, made locally: nothing left my machine. Approvals given in chat are not counted._')
@@ -61,8 +63,9 @@ test('markdown card skips optional sections that are absent', () => {
   delete t.wildcard
   delete t.secrets
   delete t.byShape
+  delete t.ruleUse
   const md = renderMarkdown(t, { files: 0 }, { version: '9.9.9' })
-  for (const s of ['Wildcard reliance', 'Secrets in', 'Where the agent was running', 'Allow-rules now']) assert.ok(!md.includes(s), s)
+  for (const s of ['Wildcard reliance', 'Secrets in', 'Where the agent was running', 'Allow-rules now', 'Unused rules']) assert.ok(!md.includes(s), s)
   const empty = renderMarkdown({ files: 2, toolResults: 3, withDecision: 0, gates: {} }, {}, { version: '9.9.9' })
   assert.ok(empty.includes('No recorded permission decisions found.'))
   assert.ok(!empty.includes('| Gate |'))
@@ -166,7 +169,8 @@ test('the text card keeps every existing line byte for byte, with or without --s
       '',
       'Static rules approved 33.3%, the AI classifier 16.7%, you 1 action(s).',
       "(1 answers to the agent's own questions are not counted as approvals.)",
-      'Your allow-rules now: 2 allow · 1 deny · 0 ask · 1 wildcard interpreter/remote rule(s) · 0 with a secret inline',
+      'Your allow-rules now: 2 allow in 1 settings file(s) · 1 deny · 0 ask · 1 wildcard interpreter/remote rule(s) · 0 with a secret inline',
+      '1 of 1 shell allow-rule never approved a command in this window.',
       'Not counted: approvals you give in chat. Nothing left this machine.',
     ]
     const lines = plain.stdout.split('\n')
@@ -195,7 +199,9 @@ test('CLI: --md prints the markdown card; --svg refuses to overwrite without --f
     const md = cli(['--md'], cwd, home)
     assert.equal(md.status, 0, md.stderr)
     const rules = auditSettings([join(home, '.claude', 'settings.json')])
-    assert.equal(md.stdout, renderMarkdown(await scanAll(FIXTURES), rules, { version: VERSION }) + '\n')
+    const t = await scanAll(FIXTURES)
+    t.ruleUse = { shellRules: 1, unused: 1, from: 'settings' } // python3:* approves none of the fixture's commands
+    assert.equal(md.stdout, renderMarkdown(t, rules, { version: VERSION }) + '\n')
     for (const s of FIXTURE_STRINGS) assert.ok(!md.stdout.includes(s), s)
 
     const shapesMd = cli(['--md'], cwd, home, SHAPE_FIXTURES).stdout
