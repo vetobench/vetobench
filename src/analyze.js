@@ -93,7 +93,7 @@ function newTotals() {
   const byShape = Object.fromEntries(SHAPES.map(([k]) => [k, { withDecision: 0, gates: {} }]))
   const shapeFiles = Object.fromEntries(SHAPES.map(([k]) => [k, 0]))
   const totals = { files: 0, unreadable: 0, toolResults: 0, withDecision: 0, repeats: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null,
-    versions: {}, byShape, shapeFiles, wildcard: { actions: 0, examined: 0, wordBoundary: 0, byFamily: {} } }
+    versions: {}, byShape, shapeFiles, wildcard: { actions: 0, examined: 0, wordBoundary: 0, byFamily: {} }, byDay: {} }
   return withState(totals)
 }
 
@@ -198,6 +198,7 @@ export async function scanFile(path, totals, { since = null, until = null, attri
     if (decoded) folderLaunch.set(folder, decoded)
   }
   const mainGates = {} // main-thread decisions; their shape (interactive or loop) is known only after the whole file
+  const mainDays = {} // the same, per UTC day
   let ranLoop = false
   totals.files += 1
   try {
@@ -210,6 +211,7 @@ export async function scanFile(path, totals, { since = null, until = null, attri
   const shape = isSubagentFile ? 'graph' : ranLoop ? 'loop' : 'interactive'
   totals.shapeFiles[shape] += 1
   for (const [gate, n] of Object.entries(mainGates)) addShape(totals, shape, gate, n)
+  for (const [day, n] of Object.entries(mainDays)) totals.byDay[day].shapes[shape] += n
   return totals
 
   async function scanLines(path) {
@@ -283,7 +285,16 @@ export async function scanFile(path, totals, { since = null, until = null, attri
         const gate = gateOf(pd, tool)
         totals.gates[gate] = (totals.gates[gate] || 0) + 1
         if (gate === 'human') totals.humanByTool[toolLabel(tool)] = (totals.humanByTool[toolLabel(tool)] || 0) + 1
-        if (isSubagentFile || o.isSidechain === true) addShape(totals, 'graph', gate)
+        // Per UTC day: decisions, gates and shapes (dates and counts only), for drift and graph.
+        const inGraph = isSubagentFile || o.isSidechain === true
+        if (DAY.test(day)) {
+          const bd = totals.byDay[day] || (totals.byDay[day] = { withDecision: 0, gates: {}, shapes: { interactive: 0, loop: 0, graph: 0 } })
+          bd.withDecision += 1
+          bd.gates[gate] = (bd.gates[gate] || 0) + 1
+          if (inGraph) bd.shapes.graph += 1
+          else mainDays[day] = (mainDays[day] || 0) + 1
+        }
+        if (inGraph) addShape(totals, 'graph', gate)
         else mainGates[gate] = (mainGates[gate] || 0) + 1
         if (attribute && (gate === 'rule' || gate === 'rules-compound') && tool === 'Bash' && command && typeof command === 'string') {
           const w = totals.wildcard

@@ -189,3 +189,19 @@ test('auditSettings counts wildcard and secret-bearing rules without returning t
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('byDay splits decisions, gates and shapes per UTC day, and adds up to the totals', async () => {
+  const { scanAll } = await import('../src/analyze.js')
+  const { join, dirname } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const t = await scanAll(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'shapes'))
+  const days = Object.values(t.byDay)
+  assert.ok(days.length > 0)
+  assert.equal(days.reduce((n, d) => n + d.withDecision, 0), t.withDecision)
+  for (const [shape] of Object.entries(t.byShape)) {
+    assert.equal(days.reduce((n, d) => n + d.shapes[shape], 0), t.byShape[shape].withDecision, shape)
+  }
+  for (const gate of Object.keys(t.gates)) assert.equal(days.reduce((n, d) => n + (d.gates[gate] || 0), 0), t.gates[gate], gate)
+  for (const k of Object.keys(t.byDay)) assert.match(k, /^\d{4}-\d{2}-\d{2}$/)
+})
+
