@@ -31,6 +31,7 @@ jobs:
           offline node bin/vetobench.js test/fixtures/shapes --md
           offline node bin/vetobench.js test/fixtures/shapes --share
           offline node bin/vetobench.js test/fixtures/shapes --svg "$RUNNER_TEMP/card.svg"
+          offline node bin/vetobench.js graph --html "$RUNNER_TEMP/report.html" test/fixtures/shapes
           offline node bin/vetobench.js test/fixtures/secrets --secrets
           offline node bin/vetobench.js replay test/fixtures/replay --json
           # fix: a dry run, then --write, against a throwaway home with synthetic settings

@@ -10,6 +10,7 @@ import { ruleScopes } from '../src/settings.js'
 import { SECRET_CATEGORIES, scanSecrets } from '../src/secrets.js'
 import { replayCommand } from '../src/replay.js'
 import { fixCommand } from '../src/fix.js'
+import { graphCommand } from '../src/graph.js'
 
 // One source of truth: the version in package.json (the release workflow checks the tag against it).
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
@@ -29,6 +30,7 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
 
   replay            how often "ask before production writes" would have asked (vetobench replay --help)
   fix               remove secret, wildcard and never-used allow-rules; a dry run unless --write (vetobench fix --help)
+  graph             a local HTML report of who approved your agent's actions, day by day (vetobench graph --help)
 
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
@@ -170,6 +172,9 @@ async function main() {
     console.log(text)
     process.exitCode = code
     return
+  }
+  if (process.argv[2] === 'graph') {
+    return console.log(await graphCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects') }))
   }
   const o = parseArgs(process.argv.slice(2))
   if (o.help) return console.log(HELP)
