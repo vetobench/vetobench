@@ -364,6 +364,10 @@ export function renderFix(plan, written, version, { customDir = false } = {}) {
   if (!written) {
     lines.push(r ? `Would remove ${num(r)} of ${num(plan.allow)} allow-rules, from ${num(plan.files.length)} file(s).` : 'Nothing to remove.')
     lines.push(r ? 'Dry run: nothing was changed. Run with --write to apply; each file is backed up first.' : 'Dry run: nothing was changed.')
+    if (plan.remove.secret) {
+      lines.push('Rules with a secret: removing one does not change the secret. Claude Code will ask you once the next time; keep the')
+      lines.push('secret out of the command (an environment variable, ~/.pgpass) before you approve it again, or it is saved again.')
+    }
   } else {
     lines.push(`Removed ${num(written.rules)} of ${num(plan.allow)} allow-rules, from ${num(written.files)} file(s).`)
     if (written.changed) lines.push(`${num(written.changed)} file(s) changed while vetobench ran, so they were left alone: run it again.`)
@@ -374,6 +378,11 @@ export function renderFix(plan, written, version, { customDir = false } = {}) {
       lines.push('Compare a backup with its file to see exactly what was removed. The backups still hold any removed secrets:')
       lines.push('delete them once you have checked, and rotate those secrets. Open Claude Code sessions may keep the old rules')
       lines.push('until you restart them. A removed rule you still need comes back the next time you approve it.')
+    }
+    if (written.rules && plan.remove.secret) {
+      lines.push('About the rules with a secret: nothing happens to the secret itself. The next time the agent runs such a command,')
+      lines.push('Claude Code asks you once; "always allow" would save the secret into a rule again. Move it out of the command first')
+      lines.push('(an environment variable, a .env file the command reads, or ~/.pgpass for Postgres), then allow the command without it.')
     }
   }
   lines.push('')

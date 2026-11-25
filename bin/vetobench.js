@@ -144,9 +144,26 @@ function render(t, rules) {
   }
   if (unused) lines.push(unused)
   lines.push(...secretLines(t.secrets, t.files))
+  lines.push(...nextSteps(t, rules))
   lines.push('')
   lines.push('Not counted: approvals you give in chat. Nothing left this machine.')
   return lines.join('\n')
+}
+
+// What to do about the card: one line per command, shown only when the card found something it would change.
+// No counts here: fix and scrub judge with their own rules, so their numbers can differ from the card's.
+function nextSteps(t, rules) {
+  const out = []
+  if ((t.ruleUse && t.ruleUse.unused) || rules.wildcard || rules.secret) {
+    out.push('  npx vetobench fix        shows which allow-rules it would remove: never used, broad wildcards, secrets inside.')
+    out.push('                           Nothing changes until you add --write; every file is backed up first.')
+  }
+  if (t.secrets && Object.values(t.secrets.byCategory || {}).some(Boolean)) {
+    out.push('  npx vetobench scrub      shows which secret values it would redact in your transcripts (rotate them anyway).')
+  }
+  out.push(`  npx vetobench doctor     a checkup of your permission settings${rules.files && !rules.deny ? ' (you have no deny rules)' : ''}.`)
+  out.push('  vetobench hook install   asks you before production writes, CI triggers and pushes to main.')
+  return ['', 'What you can do next:', ...out]
 }
 
 // Counts per fixed category, never values. Without --secrets, one line says how to get them.
