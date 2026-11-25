@@ -375,7 +375,8 @@ test('the CLI runs drift: help, a fixed past window as JSON, and errors with exi
 })
 
 // The example in docs/drift.md is the output of the command shown above it, run from the repository root on the
-// committed synthetic fixture. A change to drift's output, or a new version number in its first line, needs a new paste.
+// committed synthetic fixture. A change to drift's output needs a new paste; the version number in the first line is
+// ignored, so a release does not break this test.
 test('the example in docs/drift.md is byte for byte the output of the command shown above it', () => {
   const doc = readFileSync(join(ROOT, 'docs', 'drift.md'), 'utf8')
   const blocks = [...doc.matchAll(/^```sh\nnode bin\/vetobench\.js (drift [^\n]+)\n```\n\n```\n([\s\S]*?)\n```$/gm)]
@@ -388,7 +389,8 @@ test('the example in docs/drift.md is byte for byte the output of the command sh
   try {
     const r = spawnSync(process.execPath, [BIN, ...args], { cwd: ROOT, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' })
     assert.equal(r.status, 0, r.stderr)
-    assert.equal(r.stdout, `${shown}\n`, `docs/drift.md is out of date: paste the output of \`node bin/vetobench.js ${command}\``)
+    const anyVersion = (t) => t.replace(/^vetobench \d+\.\d+\.\d+/, 'vetobench X.Y.Z')
+    assert.equal(anyVersion(r.stdout), anyVersion(`${shown}\n`), `docs/drift.md is out of date: paste the output of \`node bin/vetobench.js ${command}\``)
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
