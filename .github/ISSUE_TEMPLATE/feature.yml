@@ -1,0 +1,37 @@
+name: Feature idea
+description: Something vetobench could count, check or show.
+title: "Idea: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are welcome. A few rules are firm (see [CONTRIBUTING.md](https://github.com/vetobench/vetobench/blob/main/CONTRIBUTING.md)): vetobench makes no network calls, has no runtime dependencies, and prints counts only, never commands, paths, prompts, rule bodies or secrets. An idea that needs to break one of these will be declined, however useful it is.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The question it answers
+      description: What do you want to know about your agent, your rules or a guard that vetobench does not tell you today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What vetobench would count or show. If it is a new number, say how it could be reproduced from the transcripts.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead
+      description: A workaround, a script or another tool. Optional.
+    validations:
+      required: false
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: The firm rules
+      options:
+        - label: The idea works on this machine only, with no dependency, and its output is counts only.
+          required: true

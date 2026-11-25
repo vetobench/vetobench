@@ -1,0 +1,73 @@
+name: Wrong verdict
+description: A guard verdict vetobench mis-scored, or a rule it misclassifies. Synthetic reproduction only.
+title: "Wrong verdict: "
+labels: ["wrong-verdict"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for checking the numbers. This issue is public, so the reproduction must be **synthetic**: write a small, made-up example that shows the same behaviour.
+        Never paste real transcripts, commands, prompts, file paths, hosts, rule bodies or secrets, not even redacted ones. Use names like `example-app` and `db.example.test`.
+        Output that leaks commands, paths, prompts, rule bodies or secrets is a vulnerability: [report it privately](https://github.com/vetobench/vetobench/security/advisories/new) instead.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is wrong
+      options:
+        - Who approved an action (static rule, AI classifier, you) is counted under the wrong gate
+        - A replay ask is wrong (it asked when it should not, or missed a command it should ask about)
+        - An allow-rule is misclassified (secret, broad wildcard, bare Bash or never-used)
+        - Wildcard attribution (an action credited to the wrong rule, or to none)
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: vetobench version
+      description: The output of `npx vetobench --version`.
+      placeholder: 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: claude-code
+    attributes:
+      label: Claude Code version
+      description: The output of `claude --version`, or the range from your card. Optional.
+      placeholder: 2.1.320
+    validations:
+      required: false
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Synthetic reproduction
+      description: |
+        The smallest made-up input that shows it: a rule, a shell command, a policy entry or a few hand-written transcript lines, and the vetobench command you ran on it (with paths replaced by `<dir>` or `<file>`).
+      placeholder: |
+        Rule:    Bash(make example-target:*)
+        Command: make example-target --dry-run
+        Ran:     npx vetobench replay <dir> --json
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What vetobench says
+      description: The verdict, gate or counts it reports for the reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What it should say, and why
+      description: For a guard verdict, say which guard and version, and what it decides on the same input.
+    validations:
+      required: true
+  - type: checkboxes
+    id: synthetic
+    attributes:
+      label: Synthetic only
+      options:
+        - label: The reproduction is made up. It holds no real transcript, command, prompt, file path, host, rule body or secret.
+          required: true
