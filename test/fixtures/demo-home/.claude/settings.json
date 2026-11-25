@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "WebSearch",
+      "WebFetch(domain:docs.example.com)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git:*)",
+      "Bash(npm test)",
+      "Bash(npm run lint)",
+      "Bash(npm run build:*)",
+      "Bash(python3 -m pytest:*)",
+      "Bash(python3:*)",
+      "Bash(ls:*)",
+      "Bash(rg:*)",
+      "Bash(cat:*)",
+      "Bash(docker compose up:*)",
+      "Bash(make release)",
+      "Bash(terraform plan:*)",
+      "Bash(yarn install)",
+      "Bash(PGPASSWORD=example-only psql -h localhost:*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(npm publish:*)",
+      "Bash(ssh:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)"
+    ]
+  }
+}
