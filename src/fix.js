@@ -9,6 +9,7 @@ import { basename, dirname, join } from 'node:path'
 import { scanAll, isBroadWildcard, SECRET_PATTERNS } from './analyze.js'
 import { loadAllowRules, attributeCommand, parseRule } from './attribution.js'
 import { ruleScopes } from './settings.js'
+import { isTooLong } from './rules.js'
 
 /** Too little history makes "never fired" meaningless: below this many days, unused rules are left alone. */
 export const MIN_DAYS = 14
@@ -29,6 +30,7 @@ const daysBetween = (a, b) => (DAY.test(a) && DAY.test(b) ? Math.round((Date.par
  * secret (a database URL whose password is `$DB_PASSWORD`), so such a rule is not removed for it.
  */
 export function holdsSecret(r) {
+  if (isTooLong(r)) return false // never run the secret patterns on a hostile, very long rule (counted elsewhere)
   const text = String(r)
   return SECRET_PATTERNS.some(([, , rx]) => {
     for (const m of text.matchAll(new RegExp(rx.source, rx.flags.includes('g') ? rx.flags : rx.flags + 'g'))) {

@@ -50,7 +50,7 @@ npx vetobench fix --write   # removes them, after backing each file up
 
 | Command | What it does |
 |---|---|
-| `npx vetobench doctor` | A checkup of your permission settings: eleven fixed checks (allow-rules with a secret, broad wildcards, a bare `Bash` allow, prompts turned off, MCP servers allowed wholesale, no deny rules and more), each with a level and a count. `--ci` exits 1 on a high finding. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/doctor.md) |
+| `npx vetobench doctor` | A checkup of your permission settings: twelve fixed checks (allow-rules with a secret, broad wildcards, a bare `Bash` allow, prompts turned off, MCP servers allowed wholesale, no deny rules and more), each with a level and a count. `--ci` exits 1 on a high finding. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/doctor.md) |
 | `npx vetobench drift` | Who approved your agent's actions, week by week, with each share's change against the week before. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/drift.md) |
 | `npx vetobench graph --html report.html` | One self-contained HTML page with the card over time: a chart by who approved, a chart by where the agent ran, and the totals. Each bar is a UTC day, or a bucket of whole weeks when the window is longer than 92 days. No scripts from anywhere, no network. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/graph.md) |
 | `npx vetobench mcp` | Your MCP permission surface: servers by scope and transport, the allow-rules that let their tools run without asking, and who approved the MCP calls in your transcripts. Never a server or tool name. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/mcp.md) |
