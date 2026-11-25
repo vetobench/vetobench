@@ -34,6 +34,12 @@ jobs:
           offline node bin/vetobench.js graph --html "$RUNNER_TEMP/report.html" test/fixtures/shapes
           offline node bin/vetobench.js test/fixtures/secrets --secrets
           offline node bin/vetobench.js replay test/fixtures/replay --json
+          offline node bin/vetobench.js drift test/fixtures/shapes --asks --json
+          offline env HOME="$RUNNER_TEMP" node bin/vetobench.js doctor test/fixtures/projects --json
+          offline env HOME="$RUNNER_TEMP" node bin/vetobench.js mcp test/fixtures/projects --json
+          # hook run: must answer "ask" for a push to main, and stay silent for a harmless command
+          printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | offline node bin/vetobench.js hook run | grep -q '"ask"'
+          test -z "$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | offline node bin/vetobench.js hook run)"
           # fix: a dry run, then --write, against a throwaway home with synthetic settings
           mkdir -p "$RUNNER_TEMP/h/.claude"
           printf '{"permissions":{"allow":["Bash(python3:*)","Bash(git status)"]}}\n' > "$RUNNER_TEMP/h/.claude/settings.json"

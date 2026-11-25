@@ -96,6 +96,18 @@ The rules line ("Your allow-rules now") and wildcard attribution read your curre
 - **Output:** counts only, like the card. No rule, path or secret is printed. Compare a backup with its file to see what was removed, then delete the backup: it still holds any removed secret.
 - **Limits:** "never fired" uses reconstructed rule matching (see Wildcard attribution), so it is an estimate. A rule removed by mistake costs one prompt: approve it again and it comes back.
 
+## Other commands
+
+Each of these follows the same rules as the card: it reads local files, sends nothing, and prints counts only. Their methods, sources and limits are in their own documents.
+
+- **`doctor`** ([docs/doctor.md](docs/doctor.md)): eleven fixed checks on the settings files of [Settings files](#settings-files); every settings key it reads is checked against Claude Code's documentation, cited there. The checks are heuristics: they say where to look, not whether a setup is safe.
+- **`drift`** ([docs/drift.md](docs/drift.md)): the card's gates and shapes per ISO week (Monday start, UTC), from one scan; changes are the difference between the two shares as printed.
+- **`graph`** ([docs/graph.md](docs/graph.md)): the card's totals per UTC day, as one self-contained HTML file.
+- **`mcp`** ([docs/mcp.md](docs/mcp.md)): MCP servers from the configuration files Claude Code documents, MCP allow, deny and ask rules, and MCP tool calls by gate.
+- **`hook`** ([docs/hook.md](docs/hook.md)): the `replay` policy run live as a `PreToolUse` hook; it fails open (an error never blocks the agent).
+- **`check-settings`** ([action/README.md](action/README.md)): the secret and wildcard checks of `fix`, for committed settings in CI.
+- **Codex CLI** ([docs/codex.md](docs/codex.md)): not supported; its transcripts do not record who approved each tool call.
+
 ## Known limits
 
 - **Approvals given in chat** ("go ahead", "post it") are invisible to this field and not counted.
