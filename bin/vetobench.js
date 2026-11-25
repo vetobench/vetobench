@@ -16,6 +16,7 @@ import { doctorCommand } from '../src/doctor.js'
 import { hookCommand } from '../src/hook.js'
 import { mcpCommand } from '../src/mcp.js'
 import { graphCommand } from '../src/graph.js'
+import { scrubCommand } from '../src/scrub.js'
 
 // One source of truth: the version in package.json (the release workflow checks the tag against it).
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
@@ -41,6 +42,7 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
   hook              have Claude Code ask you before the commands replay counts; a dry run unless --write (vetobench hook --help)
   mcp               your MCP servers, the rules that allow their tools, and who approved their calls (vetobench mcp --help)
   graph             a local HTML report of who approved your agent's actions, day by day (vetobench graph --help)
+  scrub             redact secrets left in plain text in your transcripts; a dry run unless --write (vetobench scrub --help)
 
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
@@ -211,6 +213,12 @@ async function main() {
   }
   if (process.argv[2] === 'graph') {
     return console.log(await graphCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects') }))
+  }
+  if (process.argv[2] === 'scrub') {
+    const { text, code } = await scrubCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects'), home: homedir() })
+    console.log(text)
+    process.exitCode = code
+    return
   }
   const o = parseArgs(process.argv.slice(2))
   if (o.help) return console.log(HELP)
