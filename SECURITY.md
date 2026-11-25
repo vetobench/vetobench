@@ -4,13 +4,13 @@ vetobench reads sensitive local files (agent transcripts and settings). Its prom
 
 ## Report privately
 
-Use GitHub's private vulnerability reporting on this repository ("Report a vulnerability" under the Security tab) for:
+Use GitHub's private vulnerability reporting: [report a vulnerability](https://github.com/vetobench/vetobench/security/advisories/new) (also under the Security tab, "Report a vulnerability"). Please report:
 
 - any network activity by vetobench;
 - output that reveals commands, paths, prompts, rule bodies or secret values;
 - a tampered release or package, or a compromised publishing path.
 
-You will get a reply within 72 hours.
+You will get a reply within 72 hours. The process: I confirm the report, fix it in a private fork where possible, publish a release with the fix, and then disclose it in a GitHub security advisory with credit to you (unless you prefer not to be named). Please give me up to 90 days before you disclose publicly.
 
 ## Report publicly
 
