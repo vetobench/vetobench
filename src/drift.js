@@ -236,7 +236,7 @@ export function renderDrift(d, { version } = {}) {
   return out.join('\n')
 }
 
-const mdCell = (s) => String(s).replace(/\|/g, '\\|')
+const mdCell = (s) => String(s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|')
 const mdRow = (cells) => `| ${cells.map(mdCell).join(' | ')} |`
 
 export function renderDriftMarkdown(d, { version } = {}) {

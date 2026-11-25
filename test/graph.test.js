@@ -161,8 +161,8 @@ test('the page is self-contained: no URL, no external reference, and a CSP that 
   const csp = /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(html)[1]
   assert.match(csp, /^default-src 'none';/)
   const sha = (s) => `'sha256-${createHash('sha256').update(s, 'utf8').digest('base64')}'`
-  assert.ok(csp.includes(`style-src ${sha(/<style>([\s\S]*?)<\/style>/.exec(html)[1])}`), 'the style hash matches')
-  assert.ok(csp.includes(`script-src ${sha(/<script>([\s\S]*?)<\/script>/.exec(html)[1])}`), 'the script hash matches')
+  assert.ok(csp.includes(`style-src ${sha(/<style>([\s\S]*?)<\/style>/i.exec(html)[1])}`), 'the style hash matches')
+  assert.ok(csp.includes(`script-src ${sha(/<script>([\s\S]*?)<\/script>/i.exec(html)[1])}`), 'the script hash matches')
   assert.ok(html.includes('@media (prefers-color-scheme:dark)'))
   assert.ok(html.includes('<meta name="viewport" content="width=device-width, initial-scale=1">'))
   assert.ok(html.includes('Counts only, made locally.'))
