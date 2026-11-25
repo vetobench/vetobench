@@ -4,9 +4,10 @@ A GitHub Action that fails a job when a repository's committed Claude Code setti
 
 - **holds a secret:** a password, key or token written into the rule (database URLs with a password, `PGPASSWORD=`, private keys, API keys and tokens, JWTs, `*_TOKEN=` and similar assignments). A `$VARIABLE` in place of the value is fine;
 - **is a broad wildcard** on an interpreter or remote command: `python3:*`, `node:*`, `bash:*`, `ssh:*`, `curl:*`, `git:*`, `gh:*`, `npm:*`, `docker:*`, `sudo:*` and the rest of the `BROAD` list in [`src/analyze.js`](../src/analyze.js). Narrow rules such as `Bash(git status)` or `Bash(npm run lint:*)` pass;
-- **allows every shell command:** `Bash`, `Bash()`, `Bash(*)` or `Bash(:*)`.
+- **allows every shell command:** `Bash`, `Bash()`, `Bash(*)`, `Bash(:*)`, `Bash(**)`, `Bash(* *)`, or any other rule whose parentheses hold only `*` and spaces. A `*` in a Bash rule matches any text, spaces included ([permissions, "Wildcard patterns"](https://code.claude.com/docs/en/permissions#wildcard-patterns));
+- **is too long to check:** a rule over 4,096 characters is never run through the secret patterns, because some of them take quadratic time on a crafted rule, and a pull request from a fork can commit any settings file. Such a rule fails the check on its own.
 
-It also fails when a file you named is missing or a file is not valid JSON (comments and a byte-order mark are accepted). These are the same secret and wildcard checks that `vetobench fix` uses.
+It also fails when a file you named is missing or a file is not valid JSON (comments and a byte-order mark are accepted). These are the same secret and wildcard checks that `vetobench fix` uses, and the same bare-Bash shape that `vetobench doctor` counts.
 
 ## Usage
 
@@ -23,6 +24,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,6 +34,8 @@ jobs:
           node-version: 22
       - uses: vetobench/vetobench/action@COMMIT_SHA # v0.2.0
 ```
+
+`timeout-minutes: 5` caps the job: the check takes seconds, and a cap stops a pull request from holding a runner for GitHub's six-hour default.
 
 Replace `COMMIT_SHA` with the full commit SHA of the release tag you choose, as the other two actions are pinned. `git ls-remote https://github.com/vetobench/vetobench 'refs/tags/v0.2.0*'` prints it: take the line that ends in `^{}` if there is one, otherwise the only line. A tag name or a branch would let a later push change the code your CI runs.
 
@@ -64,9 +68,10 @@ Claude Code keeps `settings.local.json` out of git by default, so in CI the defa
 ```
 vetobench 0.2.0 check-settings: 1 settings file(s), 5 allow-rule(s)
 
-  Rules with a secret inside                           1
-  Broad wildcards (python3:*, ssh:*, git:* ...)        1
-  Bare Bash (allows every shell command)               1
+  Rules with a secret inside                             1
+  Broad wildcards (python3:*, ssh:*, git:* ...)          1
+  Bare Bash (allows every shell command)                 1
+  Rules too long to check (over 4,096 characters)        0
 
 3 allow-rule(s) to remove or narrow. Open the file(s) on your machine to find them.
 Check failed.

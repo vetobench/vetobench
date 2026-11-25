@@ -186,8 +186,9 @@ const textOf = (content) => typeof content === 'string' ? content
  * Scan one transcript file into totals (mutates totals). since/until are 'YYYY-MM-DD' strings (until exclusive).
  * attribute(command, dir) -> { families, wordBoundary } is called for each static-approved Bash command (see
  * attribution.js); dir is the folder the record's session was launched from (sessionDir), or undefined.
- * onDecision(tool, gate, dir), if given, is called once per counted decision with the raw tool name (vetobench mcp);
- * the name must stay in the caller's memory.
+ * onDecision(tool, gate, dir, id), if given, is called once per counted decision with the raw tool name (vetobench mcp)
+ * and the tool_use id; tool is 'unknown' while that call is unseen (it can sit in a later transcript). Name and id must
+ * stay in the caller's memory.
  */
 export async function scanFile(path, totals, { since = null, until = null, attribute = null, root = null, onDecision = null } = {}) {
   const { toolNames, commands, results, decided, cwds, launch, folderLaunch, dirDays, orphans } = withState(totals).state
@@ -285,7 +286,7 @@ export async function scanFile(path, totals, { since = null, until = null, attri
         if (o.version) totals.versions[o.version] = (totals.versions[o.version] || 0) + 1
         const tool = toolNames.get(id) || 'unknown'
         const gate = gateOf(pd, tool)
-        if (onDecision) onDecision(tool, gate, dir)
+        if (onDecision) onDecision(tool, gate, dir, id)
         totals.gates[gate] = (totals.gates[gate] || 0) + 1
         if (gate === 'human') totals.humanByTool[toolLabel(tool)] = (totals.humanByTool[toolLabel(tool)] || 0) + 1
         // Per UTC day: decisions, gates and shapes (dates and counts only), for drift and graph.

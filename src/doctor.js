@@ -2,11 +2,12 @@
 // reads (your global file plus the files of every project a session ran in, found through src/settings.js) and, for the
 // one check that needs history, plans `vetobench fix` without applying it. It never prints a rule, a path, a folder or
 // a server name: only fixed check names and counts leave this module. docs/doctor.md says where each key is documented.
-import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { isBroadWildcard } from './analyze.js'
+import { isBroadWildcard, listTranscripts } from './analyze.js'
 import { loadAllowRules } from './attribution.js'
 import { planFix, holdsSecret } from './fix.js'
+import { isBareBash, isMcpWholesale, isTooLong, managedDir, managedSettingsPaths, MAX_RULE_LENGTH } from './rules.js'
 
 /** Levels in display order. --ci fails when a high check is non-zero. */
 export const LEVELS = ['high', 'medium', 'info']
@@ -14,15 +15,17 @@ export const LEVELS = ['high', 'medium', 'info']
 /**
  * The checks: [id, level, title, unit]. Ids and titles are fixed text. unit says what a count counts: rules (allow-rules
  * across all files, each file once), files (settings files that set something), dirs (directory entries), or scopes
- * (the rule sets sessions run under: your global settings alone, and global plus each project's files).
+ * (the rule sets sessions run under: your global settings alone, and global plus each project folder's files; only
+ * scopes with at least one settings file count, so scope counts grow with the number of project folders).
  */
 export const CHECKS = [
   ['secret-in-rule', 'high', 'Allow-rules with a secret inside', 'rules'],
   ['bash-allowed-wholesale', 'high', 'Bash allowed with no pattern (every shell command)', 'rules'],
-  ['bypass-default-mode', 'high', 'Default mode bypassPermissions (no permission prompts)', 'files'],
+  ['bypass-default-mode', 'high', 'Default mode bypassPermissions (no permission prompts)', 'scopes'],
   ['bypass-prompt-skipped', 'medium', 'Confirmation before bypassPermissions mode turned off', 'files'],
   ['broad-wildcard', 'medium', 'Broad wildcard allow-rules (python3:*, ssh:*, git:* ...)', 'rules'],
   ['mcp-server-wholesale', 'medium', 'MCP servers allowed wholesale (every tool of a server)', 'rules'],
+  ['rules-too-long', 'medium', `Allow-rules too long to check (over ${MAX_RULE_LENGTH.toLocaleString('en-US')} characters)`, 'rules'],
   ['project-mcp-auto', 'medium', 'All project MCP servers approved automatically', 'files'],
   ['no-deny-rules', 'medium', 'Scopes with no deny rule at all', 'scopes'],
   ['no-bash-hook', 'info', 'Scopes with no PreToolUse hook on Bash', 'scopes'],
@@ -33,19 +36,10 @@ export const CHECKS = [
 const arr = (v) => (Array.isArray(v) ? v : [])
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {})
 
-/** `Bash` or its documented equivalent `Bash(*)`: a rule on every shell command. */
-export const isBashWholesale = (r) => typeof r === 'string' && /^Bash(?:\(\*\))?$/.test(r.trim())
-
-/**
- * An MCP rule on a whole server: `mcp__srv` (no tool) or `mcp__srv__*`. The server part must be glob-free: Claude Code
- * skips an allow glob such as `mcp__*`, so it approves nothing and is not counted.
- */
-export function isMcpWholesale(r) {
-  const m = /^mcp__(.+)$/.exec(typeof r === 'string' ? r.trim() : '')
-  if (!m) return false
-  const server = m[1].endsWith('__*') ? m[1].slice(0, -3) : m[1]
-  return server !== '' && !server.includes('__') && !server.includes('*')
-}
+/** A rule on every shell command (`Bash`, `Bash(*)`, `Bash(:*)`, `Bash(* *)` ...): the shape check-settings uses too. */
+export const isBashWholesale = isBareBash
+/** A rule on every tool of one MCP server (`mcp__srv`, `mcp__srv__*`, `mcp__reports__v2__*`); rules Claude Code skips are not. */
+export { isMcpWholesale }
 
 /**
  * True when one PreToolUse matcher group runs a hook for the Bash tool, by the documented matcher rules: missing, ''
@@ -75,67 +69,111 @@ function effective(scope, key) {
   return v
 }
 
+const isSettings = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
+const disablesBypass = (settings) => obj(settings.permissions).disableBypassPermissionsMode === 'disable'
+
 /**
  * Pure checks over parsed settings files. files: [{ kind: 'user' | 'shared' | 'local', root, settings }], settings being
- * the parsed object (null when unreadable) and root the project folder (null for the user file). Returns counts by
- * check id plus file and scope totals. Nothing from a file's content is returned.
+ * the parsed object (null when unreadable) and root the project folder (null for the user file). managed: the parsed
+ * managed settings objects, read only for `disableBypassPermissionsMode`, which applies to every scope. Returns counts
+ * by check id plus file and scope totals. Nothing from a file's content is returned.
  */
-export function checkSettings(files) {
+export function checkSettings(files, { managed = [] } = {}) {
   const counts = Object.fromEntries(CHECKS.map(([id]) => [id, 0]))
-  const ok = files.filter((f) => f.settings && typeof f.settings === 'object' && !Array.isArray(f.settings))
+  const ok = files.filter((f) => isSettings(f.settings))
   for (const f of ok) {
     const s = f.settings
     const perm = obj(s.permissions)
     for (const r of arr(perm.allow)) {
+      // A rule this long is not run through the patterns: the secret regexes take quadratic time on some inputs.
+      if (isTooLong(r)) { counts['rules-too-long'] += 1; continue }
       if (holdsSecret(r)) counts['secret-in-rule'] += 1
       if (isBashWholesale(r)) counts['bash-allowed-wholesale'] += 1
       if (isBroadWildcard(r)) counts['broad-wildcard'] += 1
       if (isMcpWholesale(r)) counts['mcp-server-wholesale'] += 1
-    }
-    // bypassPermissions as a default takes effect from user settings only (and managed, which are not read here).
-    if (f.kind === 'user' && perm.defaultMode === 'bypassPermissions' && perm.disableBypassPermissionsMode !== 'disable') {
-      counts['bypass-default-mode'] += 1
     }
     // Honored in user and local settings, not in a project's shared file.
     if (f.kind !== 'shared' && s.skipDangerousModePermissionPrompt === true) counts['bypass-prompt-skipped'] += 1
     if (s.enableAllProjectMcpServers === true) counts['project-mcp-auto'] += 1
     counts['additional-dirs'] += arr(perm.additionalDirectories).filter((d) => typeof d === 'string' && d.trim()).length
   }
-  // Scopes: the user files alone (sessions outside any project with settings), then user plus each project's files.
+  // Scopes: the user file alone (sessions outside any project with settings), then user plus each project's files. A
+  // scope counts only when it has a settings file (an unreadable one included), so a home without any has no scope.
   const userFiles = ok.filter((f) => f.kind === 'user')
   const byRoot = new Map()
   for (const f of files) if (f.kind !== 'user' && !byRoot.has(f.root)) byRoot.set(f.root, [])
   for (const f of ok) if (f.kind !== 'user') byRoot.get(f.root).push(f)
-  const scopes = [userFiles, ...[...byRoot.values()].map((own) => [...userFiles, ...own])]
+  const scopes = [...(files.some((f) => f.kind === 'user') ? [userFiles] : []), ...[...byRoot.values()].map((own) => [...userFiles, ...own])]
+  const bypassOff = managed.some((m) => isSettings(m) && disablesBypass(m))
   for (const scope of scopes) {
     // Lists merge across files: one deny rule anywhere in the scope applies to its sessions.
     if (!scope.some((f) => arr(obj(f.settings.permissions).deny).length)) counts['no-deny-rules'] += 1
     // Hook entries merge too; disableAllHooks takes the value left after precedence.
     const hooked = scope.some((f) => arr(obj(f.settings.hooks).PreToolUse).some(matchesBash))
     if (!hooked || effective(scope, 'disableAllHooks') === true) counts['no-bash-hook'] += 1
+    // bypassPermissions as a default takes effect from user settings (and managed, not read for it here), not from
+    // project or local ones. disableBypassPermissionsMode works from any file: managed, user, shared or local.
+    const bypass = scope.some((f) => f.kind === 'user' && obj(f.settings.permissions).defaultMode === 'bypassPermissions')
+    if (bypass && !bypassOff && !scope.some((f) => disablesBypass(f.settings))) counts['bypass-default-mode'] += 1
   }
   return { counts, scopes: scopes.length, files: files.length, user: files.filter((f) => f.kind === 'user').length,
     project: files.filter((f) => f.kind !== 'user').length, unreadable: files.length - ok.length }
 }
 
+/**
+ * The managed settings files Claude Code reads from the managed folder (managed-settings.json, then the
+ * managed-settings.d drop-ins): { found, unreadable, values }. Settings delivered by MDM, the registry or the server
+ * are not read.
+ */
+export function readManaged(dir) {
+  const res = { found: 0, unreadable: 0, values: [] }
+  for (const p of managedSettingsPaths(dir)) {
+    let text
+    try { text = readFileSync(p, 'utf8') } catch (e) {
+      if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) continue
+      res.found += 1
+      res.unreadable += 1
+      continue
+    }
+    res.found += 1
+    const v = parseSettings(text)
+    if (isSettings(v)) res.values.push(v)
+    else res.unreadable += 1
+  }
+  return res
+}
+
+/** How many transcripts under dir cannot be opened (the scan skips them). Counts only; nothing is read. */
+export function unopenedTranscripts(dir) {
+  let n = 0
+  for (const p of listTranscripts(dir)) {
+    try { closeSync(openSync(p, 'r')) } catch { n += 1 }
+  }
+  return n
+}
+
 const real = (p) => { try { return realpathSync(p) } catch { return p } }
 
-/** A settings file as Claude Code reads it: strict JSON (a BOM is tolerated). null when it cannot be read. */
-function readSettings(p) {
+/** Settings text as Claude Code reads it: strict JSON (a BOM is tolerated). null when it cannot be parsed. */
+function parseSettings(text) {
   try {
-    const text = readFileSync(p, 'utf8')
     return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
   } catch {
     return null
   }
 }
 
+/** A settings file, parsed. null when it cannot be read or parsed. */
+function readSettings(p) {
+  try { return parseSettings(readFileSync(p, 'utf8')) } catch { return null }
+}
+
 /**
  * The whole checkup. It plans `vetobench fix` over every settings file, shared ones included, and never applies the
  * plan: the plan reads the same files the card reads (each one handed to `load` once) and its never-fired count is the
- * estimate for unused-shell-rules.
+ * estimate for unused-shell-rules. managed: the managed settings folder (managedDir() by default).
  */
-export async function runDoctor({ dir, home, cwd }) {
+export async function runDoctor({ dir, home, cwd, managed = managedDir() }) {
   const seen = []
   const load = (paths) => { seen.push(...paths); return loadAllowRules(paths) }
   const plan = await planFix({ dir, home, cwd, includeShared: true, load })
@@ -144,7 +182,8 @@ export async function runDoctor({ dir, home, cwd }) {
     const kind = real(p) === userReal ? 'user' : basename(p) === 'settings.local.json' ? 'local' : 'shared'
     return { kind, root: kind === 'user' ? null : real(dirname(dirname(p))), settings: readSettings(p) }
   })
-  const res = checkSettings(files)
+  const mg = readManaged(managed)
+  const res = checkSettings(files, { managed: mg.values })
   const checks = CHECKS.map(([id, level, title, unit]) => ({ id, level, title, unit, count: res.counts[id] }))
   const unused = checks.find((c) => c.id === 'unused-shell-rules')
   unused.estimate = true
@@ -158,8 +197,9 @@ export async function runDoctor({ dir, home, cwd }) {
   const flagged = checks.filter((c) => c.count)
   const summary = { flagged: flagged.length, ...Object.fromEntries(LEVELS.map((l) => [l, flagged.filter((c) => c.level === l).length])) }
   const h = plan.history
-  return { settings: { files: res.files, user: res.user, project: res.project, unreadable: res.unreadable, scopes: res.scopes },
-    history: { files: h.files, firstTs: h.firstTs, lastTs: h.lastTs, days: h.days }, checks, summary }
+  return { settings: { files: res.files + mg.found, user: res.user, project: res.project, managed: mg.found,
+    unreadable: res.unreadable + mg.unreadable, scopes: res.scopes },
+  history: { files: h.files, unreadable: h.files ? unopenedTranscripts(dir) : 0, firstTs: h.firstTs, lastTs: h.lastTs, days: h.days }, checks, summary }
 }
 
 // ---- CLI ----
@@ -174,7 +214,9 @@ Reads ~/.claude/settings.json, this folder's .claude settings and those of every
 transcripts ran in, and counts what may need a look:
 ${CHECKS.map(([, level, title]) => `  ${level.padEnd(6)}  ${title}`).join('\n')}
 
-A scope is the set of settings a session runs under: your global file alone, or global plus one project's files.
+A scope is the set of settings a session runs under: your global file alone, or global plus one project folder's
+files. Only scopes with a settings file count, so the scope checks grow with the number of project folders. Managed
+settings files are read only for disableBypassPermissionsMode.
 
   --json  the same counts as JSON
   --ci    exit with status 1 when any high check is non-zero
@@ -202,9 +244,11 @@ export function renderDoctor(r, version, { ci = false } = {}) {
   const s = r.settings
   const h = r.history
   const lines = [`vetobench ${version} doctor: a checkup of your Claude Code permission settings`]
-  lines.push(`Settings: ${num(s.files)} file(s) read (${num(s.user)} global, ${num(s.project)} project)` +
+  lines.push(`Settings: ${num(s.files)} file(s) read (${num(s.user)} global, ${num(s.project)} project` +
+    (s.managed ? `, ${num(s.managed)} managed` : '') + ')' +
     (s.unreadable ? `, ${num(s.unreadable)} could not be read` : '') + ` · ${num(s.scopes)} scope(s)`)
-  lines.push(h.files ? `History: ${num(h.files)} transcripts · ${h.firstTs || '?'} to ${h.lastTs || '?'} (${num(h.days)} day(s))`
+  lines.push(h.files ? `History: ${num(h.files)} transcripts · ${h.firstTs || '?'} to ${h.lastTs || '?'} (${num(h.days)} day(s))` +
+    (h.unreadable ? ` · ${num(h.unreadable)} could not be read (skipped)` : '')
     : 'History: no transcripts, so only your global settings and this folder\'s were read.')
   lines.push('')
   const width = Math.max(...r.checks.map((c) => c.title.length))
@@ -219,13 +263,14 @@ export function renderDoctor(r, version, { ci = false } = {}) {
     ? `${num(sm.flagged)} of ${num(r.checks.length)} checks need a look: ${LEVELS.map((l) => `${num(sm[l])} ${l}`).join(', ')}.`
     : `None of the ${num(r.checks.length)} checks found anything.`)
   if (ci) lines.push(sm.high ? `--ci: failing, ${num(sm.high)} high check(s) non-zero.` : '--ci: passing, no high check is non-zero.')
-  lines.push('A scope is your global settings alone, or global plus one project\'s files. Counts only: no rule, path or')
-  lines.push('server name is printed. Nothing was changed and nothing left this machine.')
+  lines.push('A scope is your global settings alone, or global plus one project folder\'s files, so the scope counts grow')
+  lines.push('with the number of project folders. Counts only: no rule, path or server name is printed. Nothing was changed')
+  lines.push('and nothing left this machine.')
   return lines.join('\n')
 }
 
 /** `vetobench doctor …`: returns { text, code }. With --ci, code is 1 when a high check is non-zero. */
-export async function doctorCommand(argv, { version, defaultDir, home, cwd }) {
+export async function doctorCommand(argv, { version, defaultDir, home, cwd, managed }) {
   const o = parseDoctorArgs(argv, defaultDir)
   if (o.help) return { text: doctorHelp(version), code: 0 }
   // Without transcripts (a CI runner), the global file and this folder's files are still checked. A transcripts folder
@@ -233,7 +278,7 @@ export async function doctorCommand(argv, { version, defaultDir, home, cwd }) {
   let isDir = false
   try { isDir = statSync(o.dir).isDirectory() } catch {}
   if (!isDir && o.dirGiven) throw new Error(`no transcripts directory at ${o.dir}`)
-  const r = await runDoctor({ dir: o.dir, home, cwd })
+  const r = await runDoctor({ dir: o.dir, home, cwd, ...(managed && { managed }) })
   const code = o.ci && r.summary.high ? 1 : 0
   if (!o.json) return { text: renderDoctor(r, version, { ci: o.ci }), code }
   return { code, text: JSON.stringify({ vetobench: version, doctor: { ...r, ...(o.ci && { ci: { failed: code === 1 } }) } }, null, 2) }

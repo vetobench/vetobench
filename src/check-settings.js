@@ -1,21 +1,23 @@
 // vetobench check-settings: a CI check for a repository's committed Claude Code settings. It fails (exit 1) when an
-// allow-rule holds a secret, is a broad wildcard on an interpreter or remote command, or allows every shell command.
-// It reads only the files it is given (by default the current folder's .claude/settings.json and settings.local.json)
-// and prints counts only: never a rule, a path or a secret.
+// allow-rule holds a secret, is a broad wildcard on an interpreter or remote command, allows every shell command, or is
+// too long to check (a rule over 4,096 characters is never run through the secret patterns, so a hostile settings file
+// in a pull request cannot stall the job). It reads only the files it is given (by default the current folder's
+// .claude/settings.json and settings.local.json) and prints counts only: never a rule, a path or a secret.
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isBroadWildcard } from './analyze.js'
 import { holdsSecret, locateAllow } from './fix.js'
+import { isBareBash, isTooLong, MAX_RULE_LENGTH } from './rules.js'
+
+export { isBareBash }
 
 export const DEFAULT_FILES = [join('.claude', 'settings.json'), join('.claude', 'settings.local.json')]
 export const FINDINGS = [
   ['secret', 'Rules with a secret inside'],
   ['wildcard', 'Broad wildcards (python3:*, ssh:*, git:* ...)'],
   ['bareBash', 'Bare Bash (allows every shell command)'],
+  ['tooLong', `Rules too long to check (over ${MAX_RULE_LENGTH.toLocaleString('en-US')} characters)`],
 ]
-
-/** True for an allow-rule that approves every shell command: `Bash`, `Bash()`, `Bash(*)` or `Bash(:*)`. */
-export const isBareBash = (r) => typeof r === 'string' && /^Bash(?:\(\s*(?::?\*)?\s*\))?$/.test(r)
 
 /**
  * Check settings files. `named` files that do not exist count as missing (a failure); default files that do not exist
@@ -23,7 +25,7 @@ export const isBareBash = (r) => typeof r === 'string' && /^Bash(?:\(\s*(?::?\*)
  * Returns counts only: paths and rules stay in memory.
  */
 export function checkSettings(paths, { named = true } = {}) {
-  const res = { files: { checked: 0, missing: 0, unreadable: 0 }, allow: 0, findings: { secret: 0, wildcard: 0, bareBash: 0 }, failing: 0 }
+  const res = { files: { checked: 0, missing: 0, unreadable: 0 }, allow: 0, findings: { secret: 0, wildcard: 0, bareBash: 0, tooLong: 0 }, failing: 0 }
   for (const p of [...new Set(paths.map((f) => resolve(f)))]) {
     let raw
     try { raw = readFileSync(p, 'utf8') } catch (e) {
@@ -41,6 +43,8 @@ export function checkSettings(paths, { named = true } = {}) {
     res.files.checked += 1
     for (const r of allow) {
       res.allow += 1
+      // A rule this long is not run through the patterns: the secret regexes take quadratic time on some inputs.
+      if (isTooLong(r)) { res.findings.tooLong += 1; res.failing += 1; continue }
       const hit = { secret: holdsSecret(r), wildcard: isBroadWildcard(r), bareBash: isBareBash(r) }
       for (const [k, v] of Object.entries(hit)) if (v) res.findings[k] += 1
       if (Object.values(hit).some(Boolean)) res.failing += 1
@@ -64,7 +68,8 @@ Usage: npx vetobench check-settings [settings-file]... [--json]
 Exits 1 when a permissions.allow rule:
   - holds a secret (a password, key or token written into the rule; a $VARIABLE in its place is fine),
   - is a broad wildcard on an interpreter or remote command (python3:*, ssh:*, git:* ...),
-  - allows every shell command (Bash, Bash(*), Bash(:*)),
+  - allows every shell command (Bash, Bash(*), Bash(:*), Bash(* *) ...),
+  - is longer than ${MAX_RULE_LENGTH.toLocaleString('en-US')} characters (too long to check),
 or when a named file is missing or a file cannot be read as JSON. Exits 0 otherwise, also when there is no file.
 
 Reads only the files named here. Prints counts only: never a rule, a path or a secret. Nothing is sent anywhere.`
