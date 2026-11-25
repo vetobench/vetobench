@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CATEGORIES, DEFAULT_POLICY, askCategories, compilePolicy, segments, parseLabels, scanReplay, replayCommand, parseReplayArgs } from '../src/replay.js'
+import { CATEGORIES, DEFAULT_POLICY, askCategories, compilePolicy, segments, parseLabels, scanReplay, replayCommand, parseReplayArgs, asksPerDay } from '../src/replay.js'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'replay')
 // Built from parts so the publish guard's URL and IPv4 checks stay quiet on synthetic data.
@@ -219,9 +219,14 @@ test('replayCommand prints counts and fixed names only, as text and as JSON', as
     assert.match(text, /Would have asked 8 time\(s\): 53\.3% of 15 shell commands/)
     assert.match(text, /Push to a main branch\s+2\s+13\.3%/)
     assert.match(text, /By your labels: 1 of 8 ask\(s\) right, 1 wrong, 6 unlabelled/)
+    // 11-04: one push to main; 11-05: a remote SQL write and a remote restart; 11-06: a CI trigger and an apply with a push;
+    // 11-07: a k8s delete, a copy to a remote host and a remote SQL write. The copied record in session-b counts once.
+    assert.match(text, /Asks per day: 2\.00 on average over 4 day\(s\), at most 3 on one day; 0 day\(s\) with none\./)
     const json = JSON.parse(await replayCommand([FIXTURES, '--json', '--policy', policyPath], opts))
     assert.equal(json.vetobench, '9.9.9')
     assert.equal(json.replay.asks, 8)
+    assert.deepEqual(json.replay.asksPerDay, { days: 4, average: 2, busiest: 3, daysWithout: 0,
+      byDay: { '2026-11-04': 1, '2026-11-05': 2, '2026-11-06': 2, '2026-11-07': 3 } })
     assert.deepEqual(json.replay.policy, { file: true, categories: 12, disabled: [], rules: 1, ignore: 0, localHosts: 1, prodHosts: 0,
       branches: 2, remoteIsProd: true, unknownIsProd: true })
     const out = text + JSON.stringify(json)
@@ -247,4 +252,18 @@ test('replayCommand rejects bad input without echoing file content', async () =>
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('asksPerDay: calendar days from the first to the last command, quiet days and the busiest day', async () => {
+  const t = { firstTs: '2026-11-01', lastTs: '2026-11-10', asks: 3, asksByDay: { '2026-11-09': 1, '2026-11-03': 2 } }
+  assert.deepEqual(asksPerDay(t), { days: 10, average: 0.3, busiest: 2, daysWithout: 8, byDay: { '2026-11-03': 2, '2026-11-09': 1 } })
+  assert.deepEqual(asksPerDay({ firstTs: '2026-10-31', lastTs: '2026-11-01', asks: 0, asksByDay: {} }),
+    { days: 2, average: 0, busiest: 0, daysWithout: 2, byDay: {} }) // across a month boundary
+  assert.equal(asksPerDay({ firstTs: null, lastTs: null, asks: 0, asksByDay: {} }), null)
+  // A window that starts after the first ask: only days inside it count.
+  const late = await scanReplay(FIXTURES, { since: '2026-11-06' })
+  assert.deepEqual(asksPerDay(late), { days: 2, average: 2.5, busiest: 3, daysWithout: 0, byDay: { '2026-11-06': 2, '2026-11-07': 3 } })
+  // No shell command in the window: no per-day line on the card.
+  const quiet = await replayCommand([FIXTURES, '--until', '2026-11-04'], { version: '9.9.9', defaultDir: FIXTURES })
+  assert.ok(!quiet.includes('Asks per day'), quiet)
 })

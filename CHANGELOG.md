@@ -16,6 +16,7 @@ Corrections to published numbers go here as **retractions**: the claim as publis
 - `--secrets`: counts of passwords, keys and tokens left in plain text in your transcripts, by category.
 - Share formats: `--md`, `--share` (a link to a prefilled card issue that you open yourself) and `--svg`, plus a "Submit your card" issue form.
 - `vetobench replay`: how often an "ask before production writes, CI triggers and pushes to main" policy would have asked, with your own hosts via `--policy`.
+- Asks per day in `vetobench replay`: the average, the busiest day and the days without an ask, plus the count per day in `--json`.
 - Each tool call is counted once, even when a resumed or forked session copied it into another transcript. Tool names in `--json` are limited to Claude Code's built-in tools; MCP tools show as `mcp`.
 - Supply-chain hardening for the repository: every GitHub Action pinned to a full commit SHA and kept current by Dependabot, a read-only default token, and no persisted git credentials in any workflow.
 - An OpenSSF Scorecard workflow.

@@ -651,7 +651,8 @@ export function parseLabels(text) {
 /** Replay every Bash tool call under dir against the policy. since/until are 'YYYY-MM-DD' (until exclusive), by the UTC day
  * of the tool call. A tool_use id seen twice (resumed sessions copy history) is counted once. */
 export async function scanReplay(dir, { since = null, until = null, policy = DEFAULT_POLICY, labels = null } = {}) {
-  const t = { files: 0, unreadable: 0, commands: 0, asks: 0, byCategory: {}, repeated: { commands: 0, asks: 0 }, ignored: 0, firstTs: null, lastTs: null }
+  const t = { files: 0, unreadable: 0, commands: 0, asks: 0, byCategory: {}, repeated: { commands: 0, asks: 0 }, ignored: 0, firstTs: null, lastTs: null,
+    asksByDay: {} }
   const lab = labels ? { entries: labels.size, matched: 0, right: 0, wrong: 0, unlabelled: 0, missed: 0 } : null
   const seen = new Map()
   for (const f of listTranscripts(dir)) {
@@ -687,7 +688,10 @@ export async function scanReplay(dir, { since = null, until = null, policy = DEF
           const hits = askCategories(cmd, policy)
           for (const h of hits) t.byCategory[h] = (t.byCategory[h] || 0) + 1
           const asked = hits.length > 0
-          if (asked) t.asks += 1
+          if (asked) {
+            t.asks += 1
+            if (/^\d{4}-\d{2}-\d{2}$/.test(day)) t.asksByDay[day] = (t.asksByDay[day] || 0) + 1
+          }
           if (id) seen.set(id, asked)
           if (!lab) continue
           const verdict = id ? labels.get(id) : undefined
@@ -705,6 +709,20 @@ export async function scanReplay(dir, { since = null, until = null, policy = DEF
   }
   if (lab) t.labels = lab
   return t
+}
+
+/**
+ * The ask rate per UTC day, from the first to the last day with a shell command (both included): the average, the
+ * busiest day and the days without an ask. A prompt that comes rarely still gets read; one that comes often turns into
+ * a reflex. byDay lists only days with an ask, in date order. Null when the window has no valid days.
+ */
+export function asksPerDay(t) {
+  if (!t.firstTs || !t.lastTs) return null
+  const days = Math.round((Date.parse(`${t.lastTs}T00:00:00Z`) - Date.parse(`${t.firstTs}T00:00:00Z`)) / 86400000) + 1
+  if (!Number.isFinite(days) || days < 1) return null
+  const byDay = Object.fromEntries(Object.entries(t.asksByDay || {}).sort(([a], [b]) => (a < b ? -1 : 1)))
+  const counts = Object.values(byDay)
+  return { days, average: t.asks / days, busiest: counts.length ? Math.max(...counts) : 0, daysWithout: days - counts.length, byDay }
 }
 
 // ---- CLI ----
@@ -784,6 +802,12 @@ export function renderReplay(t, policy, version, fromFile = false) {
   }
   if (!t.asks) lines.push(`Would not have asked once in ${num(t.commands)} shell commands.`)
   else lines.push(`Would have asked ${num(t.asks)} time(s): ${pct(t.asks, t.commands)} of ${num(t.commands)} shell commands.`)
+  const perDay = t.asks ? asksPerDay(t) : null
+  if (perDay) {
+    const avg = perDay.average < 10 ? perDay.average.toFixed(2) : perDay.average.toFixed(1)
+    lines.push(`Asks per day: ${avg} on average over ${num(perDay.days)} day(s), at most ${num(perDay.busiest)} on one day; ` +
+      `${num(perDay.daysWithout)} day(s) with none.`)
+  }
   if (rows.reduce((n, [k]) => n + t.byCategory[k], 0) > t.asks) lines.push('(A command in two categories is asked about once, so the rows add up to more.)')
   const notes = []
   if (t.repeated.commands) notes.push(`${num(t.repeated.commands)} repeated tool call(s) counted once`)
@@ -812,6 +836,8 @@ export async function replayCommand(argv, { version, defaultDir }) {
   const { files, unreadable, commands, firstTs, lastTs, asks, repeated, ignored } = t
   // Display order, not scan order, so two runs on the same corpus diff cleanly.
   const byCategory = Object.fromEntries(CATEGORIES.filter(([k]) => t.byCategory[k]).map(([k]) => [k, t.byCategory[k]]))
-  return JSON.stringify({ vetobench: version, replay: { files, unreadable, commands, firstTs, lastTs, asks, byCategory, repeated, ignored,
+  const perDay = asksPerDay(t)
+  return JSON.stringify({ vetobench: version, replay: { files, unreadable, commands, firstTs, lastTs, asks, byCategory,
+    ...(perDay && { asksPerDay: perDay }), repeated, ignored,
     policy: { file: Boolean(o.policy), ...policy.summary }, ...(t.labels ? { labels: t.labels } : {}) } }, null, 2)
 }

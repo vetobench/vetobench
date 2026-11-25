@@ -92,6 +92,7 @@ The rules line ("Your allow-rules now") and wildcard attribution read your curre
 - **Input.** Every `Bash` tool call (`tool_use` block) in the transcripts. A tool call id that appears in more than one file (resumed sessions copy their history) is counted once; `--json` reports the repeats under `repeated`. API-request records are skipped. `--since` / `--until` select by the UTC day of the tool call.
 - **Parsing.** The command is split into simple commands, quote-aware: `;`, `&&`, `||`, `|` and newlines end one; `$( )`, backticks, `bash -c`, `eval`, ssh remote commands, and heredocs fed to ssh, a shell or a SQL client are parsed too. Quoted text, comments, and heredoc bodies written to files are data, not commands. `VAR=value`, `export` and wrappers such as `sudo`, `env`, `timeout` and `xargs` are followed.
 - **Counting.** A command that matches several categories is one ask. The share is asks over shell commands scanned.
+- **Per day.** Asks are also counted per UTC day of the tool call. The card shows the average over the calendar days from the first to the last shell command in the window (both included), the busiest day, and the days without an ask; `--json` adds `asksPerDay.byDay`, the count for each day that had an ask. The rate is the number to watch: a prompt that comes rarely still gets read, and one that comes many times a day turns into a reflex.
 
 | Category | Asks for |
 |---|---|
