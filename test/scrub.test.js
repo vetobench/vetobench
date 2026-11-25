@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { SECRET_CATEGORIES } from '../src/secrets.js'
-import { applyScrub, findValues, marker, planScrub, redactLine, scrubText } from '../src/scrub.js'
+import { applyScrub, findValues, isIdentifier, looksRandom, marker, planScrub, redactLine, scrubText } from '../src/scrub.js'
 
 const BIN = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'vetobench.js')
 
@@ -57,7 +57,7 @@ test('scrub replaces only the value, for every category, and the line stays vali
   ]
   assert.deepEqual(cases.map(([k]) => k).sort(), SECRET_CATEGORIES.map(([k]) => k).sort(), 'every category is covered')
   for (const [key, text, value] of cases) {
-    const r = redact(text)
+    const r = redact(text, key === 'assignment' ? { includeAssignments: true } : undefined)
     if (key === 'db-url') {
       assert.deepEqual(r.redacted, ['db-url', 'db-url'])
       assert.equal(r.out, text.replace('notarealpassword', marker(key)).replace('fakefakefake', marker(key)))
@@ -86,6 +86,37 @@ test('$VARIABLE and ${VARIABLE} references, URLs without a password and short va
   const line = asLine(text)
   assert.deepEqual(findValues(line), [])
   assert.equal(redactLine(line).text, line)
+})
+
+// NAME=value assignments whose value is a code identifier (no digit, shorter than 16, or words), and ones that look random.
+const IDENTIFIERS = ['MAX_TOKENS = DEFAULT_MAX_TOKENS_VALUE', 'MAX_TOKENS=DEFAULT_MAX_TOKENS_V2', 'const API_TOKEN_TTL = maxTokenLifetime2024',
+  'TOKENIZER_MODEL=claude-sonnet-4-5-20250929', 'SESSION_TOKEN=abc123def456x', 'RESET_TOKEN_ROUTE=src/tokens/resetFlowV2',
+  'SECRET_SCANNER_RULESET=HTTPResponseCode404', 'PASSWORD_RESET_HANDLER=getUserIdFromToken2']
+const RANDOM = [j('SESSION_SECRET=', 'FAKEFAKEFAKEFAKE1234'), j('API_TOKEN="', 'Xk9QmP2LzR8tWv4N', '"'), j('DEPLOY_TOKEN=', 'fake4f9a2b7c1d8e6f3a')]
+
+test('NAME=value assignments are not redacted by default; with includeAssignments only values that look random are', () => {
+  const line = asLine([...IDENTIFIERS, ...RANDOM].join('\n'))
+  assert.equal(findValues(line).filter(([k]) => k === 'assignment').length, IDENTIFIERS.length + RANDOM.length, 'every one matches the shape')
+  const off = redactLine(line)
+  assert.equal(off.text, line, 'off by default: nothing changes')
+  assert.deepEqual([off.found, off.assignments, off.randomAssignments], [[], IDENTIFIERS.length + RANDOM.length, RANDOM.length])
+  const on = redactLine(line, { includeAssignments: true })
+  assert.deepEqual(on.redacted, RANDOM.map(() => 'assignment'))
+  const out = JSON.parse(on.text).message.content.split('\n')
+  assert.deepEqual(out.slice(0, IDENTIFIERS.length), IDENTIFIERS, 'identifiers stay byte for byte')
+  assert.deepEqual(out.slice(IDENTIFIERS.length), ['SESSION_SECRET=' + marker('assignment'), `API_TOKEN="${marker('assignment')}"`, 'DEPLOY_TOKEN=' + marker('assignment')])
+  assert.deepEqual(leaks(on.text), [])
+  // The rule itself.
+  for (const v of ['DEFAULT_MAX_TOKENS_V2', 'maxTokenLifetime2024', 'claude-sonnet-4-5-20250929', 'gpt-4o-mini-2024-07-18', 'HTTPResponseCode404',
+    'x86_64_linux_gnu', 'userIdV2Lookup2024', 'src/tokens/resetFlowV2']) assert.ok(isIdentifier(v) && !looksRandom(v), v)
+  for (const v of ['FAKEFAKEFAKEFAKE1234', 'Xk9QmP2LzR8tWv4N', 'fake4f9a2b7c1d8e6f3a', 'FAKE3F9A2B7C4D1E8F', 'fakesecretpassword123', 'fake2fake2fake2fake2',
+    j('Zm9vYmFy', '+YmF6/cXV4MTIz')]) assert.ok(looksRandom(v), v)
+  for (const v of ['DEFAULT_MAX_TOKENS_VALUE', 'abc123def456x', 'only-letters-here-x']) assert.ok(!looksRandom(v), `${v}: no digit, or too short`)
+  // A hostile value: linear time.
+  const t0 = Date.now()
+  looksRandom('Ab'.repeat(200000) + '1')
+  looksRandom('A'.repeat(400000) + '1x')
+  assert.ok(Date.now() - t0 < 1000)
 })
 
 test('a line that would no longer parse stays exactly as it was, and is counted', () => {
@@ -132,7 +163,11 @@ test('the --since / --until window applies per record; records without a timesta
 const HOUR_AGO = new Date(Date.now() - 3600e3)
 const day = (d) => `2026-11-0${d}T10:00:00.000Z`
 
-/** One transcript with 25 values: 22 to redact, 1 inside signed thinking, 2 in a line that would break. */
+/**
+ * One transcript with 23 values (20 to redact, 1 inside signed thinking, 2 in a line that would break) and 6 NAME=value
+ * assignments: 2 that look random (one value written twice in one line: with --include-assignments, 25 values and 22
+ * to redact) and 4 code identifiers (record 9), which stay either way.
+ */
 function records() {
   const env = `DATABASE_URL=${F.pg}\nREDIS_URL=${F.redis}\nMYSQL_URL=${F.mysql}\nEXAMPLE_API_TOKEN=FAKEFAKEFAKEFAKE1234\nAWS_ACCESS_KEY_ID=${F.aws}\nTOKEN_LIMIT=4096`
   return [
@@ -147,6 +182,8 @@ function records() {
     { type: 'user', timestamp: day(2), message: { content: [{ type: 'tool_result', tool_use_id: 't4', content: j('col1\r', 'k_live_', 'FAKEFAKEFAKEFAKE', ' ', F.gh) }] } },
     { type: 'summary', summary: 'Debugged it; PGPASSWORD=hunter2hunter2 worked', leafUuid: 'l1' },
     { type: 'user', timestamp: day(2), message: { content: `psql ${PG}app:$DB_PASSWORD@localhost/app; API_TOKEN=$API_TOKEN` } },
+    { type: 'assistant', timestamp: day(2), message: { content: [{ type: 'tool_use', id: 't5', name: 'Edit',
+      input: { file_path: '/w/config.py', old_string: 'x', new_string: IDENTIFIERS.slice(0, 4).join('\n') } }] } },
   ]
 }
 const jsonl = (recs) => recs.map((r) => JSON.stringify(r)).join('\n') + '\n'
@@ -181,18 +218,35 @@ test('scrub: a dry run counts values by category and changes nothing', () => {
     const s = JSON.parse(r.stdout).scrub
     assert.equal(s.dryRun, true)
     assert.deepEqual(s.transcripts, { read: 2, unreadable: 0, withSecrets: 1, toChange: 1, active: 0, changed: 0, hardLinked: 0 })
-    assert.deepEqual(s.values, { found: 25, toRedact: 22, inActive: 0, inChanged: 0, inThinking: 1, wouldBreakJson: 2 })
+    assert.deepEqual(s.values, { found: 23, toRedact: 20, inActive: 0, inChanged: 0, inThinking: 1, wouldBreakJson: 2 })
     assert.deepEqual(s.lines, { toChange: 6, inThinking: 1, wouldBreakJson: 1 })
-    assert.deepEqual(s.byCategory, { 'postgres-url': 4, 'db-url': 4, pgpassword: 2, 'private-key': 2, 'anthropic-key': 1, 'openai-key': 1,
-      'github-token': 3, 'aws-key': 2, 'slack-token': 1, 'stripe-key': 2, jwt: 1, assignment: 2 })
+    const byCategory = { 'postgres-url': 4, 'db-url': 4, pgpassword: 2, 'private-key': 2, 'anthropic-key': 1, 'openai-key': 1,
+      'github-token': 3, 'aws-key': 2, 'slack-token': 1, 'stripe-key': 2, jwt: 1, assignment: 0 }
+    assert.deepEqual(s.byCategory, byCategory)
+    assert.deepEqual(s.assignments, { included: false, found: 6, lookRandom: 2, skipped: 6 })
+    assert.equal(s.written, undefined)
     assert.ok(readFileSync(t.files.a).equals(before), 'dry run changed nothing')
     assert.deepEqual(backupDirs(t.home), [])
     const text = cli([t.root], t.home).stdout
-    assert.match(text, /Would redact 22 of 25 value\(s\), in 6 line\(s\) of 1 transcript\(s\)\./)
+    assert.match(text, /Would redact 20 of 23 value\(s\), in 6 line\(s\) of 1 transcript\(s\)\./)
+    assert.match(text, /Possible secrets in NAME=value assignments \(.*\), not redacted: 6\./)
+    assert.match(text, /Pass --include-assignments to redact the 2 whose value looks random; the rest look like code identifiers\./)
     assert.match(text, /1 value\(s\) inside the model's signed thinking stay as they are/)
     assert.match(text, /2 value\(s\) in 1 line\(s\) stay as they are: redacting them would break the line's JSON\./)
     assert.match(text, /Postgres URL with a password +4/)
-    for (const out of [r.stdout, text]) assert.deepEqual(leaks(out), [])
+    assert.doesNotMatch(text, /Other \*_SECRET/, 'no assignment row when they are not included')
+    // --include-assignments: the 2 random-looking values join the values to redact; the 4 identifiers stay.
+    const inc = JSON.parse(cli([t.root, '--json', '--include-assignments'], t.home).stdout).scrub
+    assert.deepEqual(inc.values, { found: 25, toRedact: 22, inActive: 0, inChanged: 0, inThinking: 1, wouldBreakJson: 2 })
+    assert.deepEqual(inc.lines, { toChange: 6, inThinking: 1, wouldBreakJson: 1 })
+    assert.deepEqual(inc.byCategory, { ...byCategory, assignment: 2 })
+    assert.deepEqual(inc.assignments, { included: true, found: 6, lookRandom: 2, skipped: 4 })
+    const incText = cli([t.root, '--include-assignments'], t.home).stdout
+    assert.match(incText, /Would redact 22 of 25 value\(s\), in 6 line\(s\) of 1 transcript\(s\)\./)
+    assert.match(incText, /Other \*_SECRET \/ \*_TOKEN \/ \*_PASSWORD = value +2/)
+    assert.match(incText, /4 NAME=value assignment\(s\) hold a value that looks like a code identifier, not a secret, and stay as they are\./)
+    assert.doesNotMatch(incText, /Possible secrets/)
+    for (const out of [r.stdout, text, incText]) assert.deepEqual(leaks(out), [])
     // The window: only records from 2026-11-02 on.
     assert.equal(JSON.parse(cli([t.root, '--json', '--since', '2026-11-02'], t.home).stdout).scrub.values.found, 11)
   } finally {
@@ -207,7 +261,7 @@ test('scrub --write: backups (700/600, manifest), only values change, mode and m
     const st0 = statSync(t.files.a)
     const r = cli([t.root, '--write'], t.home)
     assert.equal(r.status, 0, r.stderr)
-    assert.match(r.stdout, /Redacted 22 of 25 value\(s\), in 6 line\(s\) of 1 transcript\(s\)\./)
+    assert.match(r.stdout, /Redacted 20 of 23 value\(s\), in 6 line\(s\) of 1 transcript\(s\)\./)
     assert.match(r.stdout, /Backups: ~\/\.claude\/vetobench-backups\/\d{8}T\d{6}\.\d{3}Z\//)
     assert.match(r.stdout, /The backups hold every value that was redacted: delete that folder/)
     assert.match(r.stdout, /rotate them/)
@@ -221,12 +275,14 @@ test('scrub --write: backups (700/600, manifest), only values change, mode and m
       assert.equal(count(after, v), 0, `left in the transcript: ${v.slice(0, 4)}`)
     }
     assert.equal(count(after, F.gh), 2, 'the thinking block and the line that would break keep theirs')
+    assert.equal(count(after, 'FAKEFAKEFAKEFAKE1234'), 2, 'NAME=value assignments are not redacted by default')
     // Lines without a value are byte for byte the same, and so is the text around each value.
     const old = before.split('\n')
     lines.forEach((l, i) => { if (!findValues(old[i]).length) assert.equal(l, old[i], `line ${i + 1}`) })
     const recs = after.split('\n').filter(Boolean).map((l) => JSON.parse(l))
     assert.equal(recs[1].message.content[0].input.command, `PGPASSWORD="${marker('pgpassword')}" psql "${PG}app:${marker('postgres-url')}@db.example.internal/app" -c 'select 1'`)
     assert.deepEqual(recs[5], records()[5], 'thinking record untouched')
+    assert.equal(lines[9], old[9], 'the code identifiers stay byte for byte')
     assert.equal(statSync(t.files.a).mode & 0o777, 0o640)
     assert.ok(Math.abs(statSync(t.files.a).mtimeMs - st0.mtimeMs) < 2, 'modification time kept')
     assert.ok(!readdirSync(t.proj).some((f) => /\.tmp$/.test(f)), 'no temp file left')
@@ -241,8 +297,21 @@ test('scrub --write: backups (700/600, manifest), only values change, mode and m
 
     const again = JSON.parse(cli([t.root, '--write', '--json'], t.home).stdout).scrub
     assert.deepEqual(again.values, { found: 3, toRedact: 0, inActive: 0, inChanged: 0, inThinking: 1, wouldBreakJson: 2 })
-    assert.deepEqual(again.written, { files: 0, lines: 0, values: 0, changed: 0, failed: 0 })
+    assert.deepEqual(again.written, { files: 0, lines: 0, values: 0, changed: 0, failed: 0, backup: null, backupInGit: false })
     assert.equal(backupDirs(t.home).length, 1, 'no second backup')
+
+    // --include-assignments: only the random-looking value goes, in its one line; the identifiers stay.
+    const inc = cli([t.root, '--write', '--include-assignments', '--json'], t.home)
+    assert.equal(inc.status, 0, inc.stderr)
+    const w = JSON.parse(inc.stdout).scrub.written
+    assert.deepEqual({ ...w, backup: null }, { files: 1, lines: 1, values: 2, changed: 0, failed: 0, backup: null, backupInGit: false })
+    assert.match(w.backup, /^\d{8}T\d{6}\.\d{3}Z$/, 'the folder name only, never a path')
+    assert.deepEqual(backupDirs(t.home).map((d) => d.split(/[\\/]/).pop()).sort(), [bdir.split(/[\\/]/).pop(), w.backup].sort())
+    assert.deepEqual(leaks(inc.stdout), [])
+    const final = readFileSync(t.files.a, 'utf8').split('\n')
+    assert.equal(count(final.join('\n'), 'FAKEFAKEFAKEFAKE1234'), 0)
+    assert.equal(final[9], old[9], 'the code identifiers still stay byte for byte')
+    final.forEach((l, i) => { if (i !== 2) assert.equal(l, lines[i], `only the line with the assignment changed: line ${i + 1}`) })
   } finally {
     rmSync(t.dir, { recursive: true, force: true })
   }
@@ -257,11 +326,11 @@ test('scrub --write leaves transcripts written to in the last 10 minutes alone',
     assert.equal(r.status, 0, r.stderr)
     const s = JSON.parse(r.stdout).scrub
     assert.equal(s.transcripts.active, 1)
-    assert.equal(s.values.inActive, 22)
-    assert.deepEqual(s.written, { files: 0, lines: 0, values: 0, changed: 0, failed: 0 })
+    assert.equal(s.values.inActive, 20)
+    assert.deepEqual(s.written, { files: 0, lines: 0, values: 0, changed: 0, failed: 0, backup: null, backupInGit: false })
     assert.ok(readFileSync(t.files.a).equals(before))
     assert.deepEqual(backupDirs(t.home), [])
-    assert.match(cli([t.root, '--write'], t.home).stdout, /1 transcript\(s\) holding 22 value\(s\) were written to in the last 10 minutes/)
+    assert.match(cli([t.root, '--write'], t.home).stdout, /1 transcript\(s\) holding 20 value\(s\) were written to in the last 10 minutes/)
   } finally {
     rmSync(t.dir, { recursive: true, force: true })
   }
@@ -283,7 +352,7 @@ test('applyScrub leaves a transcript that changed after the scan alone; a read-o
     chmodSync(t.files.a, 0o444)
     const r = cli([t.root, '--write', '--json'], t.home)
     assert.equal(r.status, 1)
-    assert.deepEqual(JSON.parse(r.stdout).scrub.written, { files: 0, lines: 0, values: 0, changed: 0, failed: 1 })
+    assert.deepEqual(JSON.parse(r.stdout).scrub.written, { files: 0, lines: 0, values: 0, changed: 0, failed: 1, backup: null, backupInGit: false })
     assert.ok(readFileSync(t.files.a).equals(appended), 'read-only transcript unchanged')
     assert.match(cli([t.root, '--write'], t.home).stdout, /1 transcript\(s\) could not be written \(EACCES\); they are unchanged\./)
   } finally {
@@ -304,6 +373,26 @@ test('applyScrub writes through a symlinked transcript and keeps the link', asyn
     assert.equal(res.files, 1)
     assert.ok(lstatSync(t.files.a).isSymbolicLink(), 'the link is kept')
     assert.equal(count(readFileSync(target, 'utf8'), 'hunter2hunter2'), 0)
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true })
+  }
+})
+
+test('a transcript reached through two paths (a symlinked folder, a second symlink) is planned and written once', () => {
+  const t = layout()
+  try {
+    symlinkSync(t.proj, join(t.root, 'alias-of-app')) // a folder that aliases a scanned one
+    symlinkSync(t.files.a, join(t.proj, 'b.jsonl')) // a second name for the same transcript
+    symlinkSync(t.root, join(t.proj, 'loop')) // and a cycle back to the top
+    const dry = JSON.parse(cli([t.root, '--json'], t.home).stdout).scrub
+    assert.deepEqual(dry.transcripts, { read: 2, unreadable: 0, withSecrets: 1, toChange: 1, active: 0, changed: 0, hardLinked: 0 })
+    assert.equal(dry.values.found, 23)
+    const r = cli([t.root, '--write', '--json'], t.home)
+    assert.equal(r.status, 0, r.stdout)
+    const w = JSON.parse(r.stdout).scrub.written
+    assert.deepEqual([w.files, w.values, w.changed, w.failed], [1, 20, 0, 0])
+    assert.equal(count(readFileSync(t.files.a, 'utf8'), 'hunter2hunter2'), 0)
+    assert.ok(lstatSync(join(t.proj, 'b.jsonl')).isSymbolicLink(), 'the second name is still a link')
   } finally {
     rmSync(t.dir, { recursive: true, force: true })
   }

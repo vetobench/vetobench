@@ -28,6 +28,38 @@ const GLOBAL = SECRET_PATTERNS.map(([key, , rx]) => [key, new RegExp(rx.source, 
 const PEM = new RegExp(String.raw`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:[A-Za-z0-9+/=:,. -]|\\+[nrt]|\\+\/)*?` +
   String.raw`-----END [A-Z ]*PRIVATE KEY-----|(?:[A-Za-z0-9+/=]|\\+[nrt]|\\+\/)*)`, 'y')
 
+// A NAME=value match (category `assignment`) is often code, not a secret: MAX_TOKENS = DEFAULT_MAX_TOKENS_VALUE. Its
+// value is redacted only with --include-assignments, and then only when it looks random: 16 characters or more, with
+// a letter and a digit, and not a plain identifier. A plain identifier is two or more words joined by _, - or / or run
+// together in camelCase; a word is letters of one case (or a capital and lowercase letters) with digits only at its
+// end (V2, gpt4), or digits with an optional lowercase suffix (2024, 4o). Random mixed-case strings often split into
+// camelCase-like words too, but short ones, so camelCase words must average three letters or more.
+const FIRST_WORD = /(?:[a-z]{2,}|[A-Z][a-z]+)\d*|[a-z]\d+|\d+[a-z]*(?=[A-Z][a-z]|$)|[A-Z]+\d*(?=[A-Z][a-z]|$)/y
+const NEXT_WORD = /[A-Z][a-z]+\d*|[A-Z]+\d*(?=[A-Z][a-z]|$)/y
+
+/** True for a plain identifier (see above): DEFAULT_MAX_TOKENS_V2, maxTokenLifetime2024, claude-sonnet-4-5. */
+export function isIdentifier(v) {
+  let words = 0
+  for (const part of v.split(/[_/-]/)) {
+    let n = 0
+    let letters = 0
+    for (let at = 0, rx = FIRST_WORD; at < part.length; rx = NEXT_WORD) {
+      rx.lastIndex = at
+      const m = rx.exec(part)
+      if (!m) return false
+      at = rx.lastIndex
+      n += 1
+      letters += m[0].replace(/\d+/g, '').length
+    }
+    if (n > 1 && letters < 3 * n) return false
+    words += n
+  }
+  return words >= 2
+}
+
+/** True when a NAME=value value looks random enough to be a secret, so --include-assignments redacts it. */
+export const looksRandom = (v) => v.length >= 16 && /\d/.test(v) && /[A-Za-z]/.test(v) && !isIdentifier(v)
+
 /** Where the value sits inside one match, as [start, end] offsets into it; null for a reference or a redaction marker. */
 function valueSpan(key, s) {
   if (REFERENCE.test(s)) return null
@@ -42,7 +74,8 @@ function valueSpan(key, s) {
 /**
  * Secret values in one raw JSONL line as [key, matchStart, matchEnd, valueStart, valueEnd], in line order. Same shapes
  * and priority as the --secrets scan: a match that overlaps one from an earlier category is dropped. References
- * ($VAR) and earlier redactions are not values, so a second run finds nothing.
+ * ($VAR) and earlier redactions are not values, so a second run finds nothing. NAME=value matches are included;
+ * redactLine decides whether they are redacted.
  */
 export function findValues(line) {
   const kept = []
@@ -80,12 +113,22 @@ const inWindow = (line, since, until) => {
  * One raw JSONL line (without its line break) with each value replaced by its marker. Returns the new text and the
  * categories of the values found (found), redacted (redacted), left inside signed thinking (thinking), and left because
  * the line would no longer parse (broken: the whole line then stays as it was). since/until are 'YYYY-MM-DD' (until
- * exclusive), applied to the record's timestamp as in the --secrets scan.
+ * exclusive), applied to the record's timestamp as in the --secrets scan. NAME=value matches are counted apart
+ * (assignments, and randomAssignments for those whose value looks random); they are values only with
+ * includeAssignments, and then only those that look random.
  */
-export function redactLine(line, { since = null, until = null } = {}) {
-  const res = { text: line, found: [], redacted: [], thinking: [], broken: [] }
-  const found = findValues(line)
-  if (!found.length || !inWindow(line, since, until)) return res
+export function redactLine(line, { since = null, until = null, includeAssignments = false } = {}) {
+  const res = { text: line, found: [], redacted: [], thinking: [], broken: [], assignments: 0, randomAssignments: 0 }
+  const all = findValues(line)
+  if (!all.length || !inWindow(line, since, until)) return res
+  const found = all.filter((s) => {
+    if (s[0] !== 'assignment') return true
+    const random = looksRandom(line.slice(s[3], s[4]))
+    res.assignments += 1
+    if (random) res.randomAssignments += 1
+    return random && includeAssignments
+  })
+  if (!found.length) return res
   res.found = found.map(([k]) => k)
   const before = parseLine(line)
   const guard = before !== null && line.includes('thinking"') ? signedBlocks(before).join('\n') : ''
@@ -115,9 +158,12 @@ export function redactLine(line, { since = null, until = null } = {}) {
   return res
 }
 
-const counts = () => ({ found: 0, values: 0, lines: 0, byCategory: {}, thinking: { lines: 0, values: 0 }, broken: { lines: 0, values: 0 } })
+const counts = () => ({ found: 0, values: 0, lines: 0, byCategory: {}, thinking: { lines: 0, values: 0 }, broken: { lines: 0, values: 0 },
+  assignments: { found: 0, random: 0 } })
 
 function addLine(c, r) {
+  c.assignments.found += r.assignments
+  c.assignments.random += r.randomAssignments
   c.found += r.found.length
   for (const k of r.found) c.byCategory[k] = (c.byCategory[k] || 0) + 1
   if (r.redacted.length) { c.lines += 1; c.values += r.redacted.length }
@@ -142,25 +188,38 @@ const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.si
 /**
  * Work out what scrub would change, without changing anything. Returns counts plus, per transcript with a value, the
  * stat it was read with (to detect a change before writing). Paths stay in memory: the output prints counts only.
+ * A file reached through two paths (a symlinked folder, a symlink, a hard link) is read and planned once.
  */
-export async function planScrub({ dir, since = null, until = null, now = Date.now(), activeMs = ACTIVE_MINUTES * 60000 }) {
+export async function planScrub({ dir, since = null, until = null, includeAssignments = false, now = Date.now(), activeMs = ACTIVE_MINUTES * 60000 }) {
   const keys = SECRET_CATEGORIES.map(([k]) => k)
   const plan = { read: 0, unreadable: 0, withSecrets: 0, hardLinked: 0, found: 0, byCategory: Object.fromEntries(keys.map((k) => [k, 0])),
     toRedact: { files: 0, lines: 0, values: 0 }, active: { files: 0, lines: 0, values: 0 }, changed: { files: 0, lines: 0, values: 0 },
-    thinking: { lines: 0, values: 0 }, broken: { lines: 0, values: 0 }, files: [] }
+    thinking: { lines: 0, values: 0 }, broken: { lines: 0, values: 0 }, assignments: { found: 0, random: 0 }, includeAssignments, files: [] }
   // A copy made by --write is not a transcript to scrub again (it holds the originals by design).
   const files = listTranscripts(dir).filter((f) => !relative(dir, f).split(sep).includes('vetobench-backups'))
+  const seen = new Set() // device:inode of each file read
   for (const file of files) {
-    plan.read += 1
     const c = counts()
     let st
     try {
       st = statSync(file, { bigint: true })
-      for await (const line of jsonlLines(file)) addLine(c, redactLine(line, { since, until }))
+    } catch {
+      plan.read += 1
+      plan.unreadable += 1
+      continue
+    }
+    const id = `${st.dev}:${st.ino}`
+    if (seen.has(id)) continue // planning it twice would make --write find it changed by its own first write
+    seen.add(id)
+    plan.read += 1
+    try {
+      for await (const line of jsonlLines(file)) addLine(c, redactLine(line, { since, until, includeAssignments }))
     } catch {
       plan.unreadable += 1 // never rethrow: the message would carry the path
       continue
     }
+    plan.assignments.found += c.assignments.found
+    plan.assignments.random += c.assignments.random
     if (!c.found) continue
     let after = null
     try { after = statSync(file, { bigint: true }) } catch {}
@@ -215,7 +274,7 @@ export function applyScrub(plan, { home, now = new Date(), since = null, until =
       const buf = readFileSync(real)
       const raw = buf.toString('utf8')
       if (!Buffer.from(raw, 'utf8').equals(buf)) throw Object.assign(new Error('not UTF-8'), { code: 'ENOTUTF8' }) // a rewrite would change other bytes
-      const out = scrubText(raw, { since, until })
+      const out = scrubText(raw, { since, until, includeAssignments: plan.includeAssignments })
       if (out.values !== f.values || out.lines !== f.lines) throw CHANGED
       if (!res.backupDir) {
         mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -266,26 +325,30 @@ const num = (n) => n.toLocaleString('en-US')
 
 const scrubHelp = (version) => `vetobench ${version} scrub: redact secrets left in plain text in your transcripts
 
-Usage: npx vetobench scrub [transcripts-dir] [--write] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--json]
+Usage: npx vetobench scrub [transcripts-dir] [--write] [--include-assignments] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--json]
 
 Without --write it only counts what it would redact. It finds the shapes --secrets counts (database URLs with a
-password, PGPASSWORD= values, private-key blocks, provider keys and tokens, JWTs, *_SECRET / *_TOKEN / *_PASSWORD
-values) and replaces each value, and only the value, with [redacted:<category>]. $VARIABLE references stay.
+password, PGPASSWORD= values, private-key blocks, provider keys and tokens, JWTs) and replaces each value, and only
+the value, with [redacted:<category>]. $VARIABLE references stay.
 
-  --write           apply it. Each changed transcript is first copied into ~/.claude/vetobench-backups/<time>/
-                    (readable only by you). Transcripts written to in the last ${ACTIVE_MINUTES} minutes are left alone
-  --since / --until only redact records from this window (UTC days, until exclusive)
-  --json            counts as JSON
+  --write                apply it. Each changed transcript is first copied into ~/.claude/vetobench-backups/<time>/
+                         (readable only by you). Transcripts written to in the last ${ACTIVE_MINUTES} minutes are left alone
+  --include-assignments  also redact *_SECRET / *_TOKEN / *_PASSWORD = values, but only values that look random
+                         (16+ characters with a letter and a digit, not words like MAX_TOKENS_V2). Off by default:
+                         many such matches are code, not secrets
+  --since / --until      only redact records from this window (UTC days, until exclusive)
+  --json                 counts as JSON
 
 Close your Claude Code sessions first, and rotate the secrets either way. Prints counts only: never a value, a line
 or a path. Nothing is sent anywhere.`
 
 export function parseScrubArgs(argv, defaultDir) {
-  const o = { dir: defaultDir, since: null, until: null, write: false, json: false }
+  const o = { dir: defaultDir, since: null, until: null, write: false, includeAssignments: false, json: false }
   let dirGiven = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--write') o.write = true
+    else if (a === '--include-assignments') o.includeAssignments = true
     else if (a === '--json') o.json = true
     else if (a === '-h' || a === '--help') o.help = true
     else if (a === '--since' || a === '--until') {
@@ -311,11 +374,21 @@ export function renderScrub(plan, written, version) {
     ` · ${num(plan.withSecrets)} hold a secret in plain text`)
   lines.push('')
   const rows = SECRET_CATEGORIES.filter(([k]) => plan.byCategory[k])
-  if (!rows.length) lines.push('No value of the known shapes found.')
+  const as = plan.assignments
+  if (!rows.length) lines.push(as.found && !plan.includeAssignments ? 'No value of the other known shapes found.' : 'No value of the known shapes found.')
   else {
     lines.push(`Found ${num(plan.found)} value(s):`)
     const w = Math.max(...rows.map(([, label]) => label.length))
     for (const [k, label] of rows) lines.push(`  ${label.padEnd(w)}  ${num(plan.byCategory[k]).padStart(9)}`)
+  }
+  if (!plan.includeAssignments && as.found) {
+    lines.push(`Possible secrets in NAME=value assignments (*_TOKEN=, *_SECRET=, *_PASSWORD=), not redacted: ${num(as.found)}.`)
+    if (!as.random) lines.push('None of their values looks random (they look like code identifiers), so --include-assignments would redact none.')
+    else lines.push(`Pass --include-assignments to redact the ${num(as.random)} whose value looks random` +
+      (as.random < as.found ? '; the rest look like code identifiers.' : '.'))
+  }
+  if (plan.includeAssignments && as.found > as.random) {
+    lines.push(`${num(as.found - as.random)} NAME=value assignment(s) hold a value that looks like a code identifier, not a secret, and stay as they are.`)
   }
   lines.push('')
   const t = plan.toRedact
@@ -360,11 +433,16 @@ export async function scrubCommand(argv, { version, defaultDir, home, now = new 
   const written = o.write ? applyScrub(plan, { home, now, since: o.since, until: o.until }) : null
   const code = written && (written.failed || written.changed) ? 1 : 0
   if (!o.json) return { text: renderScrub(plan, written, version), code }
-  const { read, unreadable, withSecrets, hardLinked, found, byCategory, toRedact, active, changed, thinking, broken } = plan
+  const { read, unreadable, withSecrets, hardLinked, found, byCategory, toRedact, active, changed, thinking, broken, assignments, includeAssignments } = plan
   return { code, text: JSON.stringify({ vetobench: version, scrub: { dryRun: !o.write,
     transcripts: { read, unreadable, withSecrets, toChange: toRedact.files, active: active.files, changed: changed.files, hardLinked },
     values: { found, toRedact: toRedact.values, inActive: active.values, inChanged: changed.values, inThinking: thinking.values, wouldBreakJson: broken.values },
     lines: { toChange: toRedact.lines, inThinking: thinking.lines, wouldBreakJson: broken.lines },
     byCategory,
-    ...(written && { written: { files: written.files, lines: written.lines, values: written.values, changed: written.changed, failed: written.failed } }) } }, null, 2) }
+    // NAME=value matches: all of them (found), those whose value looks random, and those this run leaves (skipped).
+    assignments: { included: includeAssignments, found: assignments.found, lookRandom: assignments.random,
+      skipped: includeAssignments ? assignments.found - assignments.random : assignments.found },
+    // backup: the backup folder's name (its UTC time) under ~/.claude/vetobench-backups/, never a full path.
+    ...(written && { written: { files: written.files, lines: written.lines, values: written.values, changed: written.changed, failed: written.failed,
+      backup: written.backupDir ? basename(written.backupDir) : null, backupInGit: !!written.backupInGit } }) } }, null, 2) }
 }
