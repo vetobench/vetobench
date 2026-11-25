@@ -11,6 +11,7 @@ Open source (Apache-2.0), no paid product. Built in public on X and LinkedIn.
 - **Zero network.** Nothing in `bin/` or `src/` may import `http`, `https`, `net`, `tls`, `dgram`, `dns` or `child_process`, or call `fetch`, `WebSocket` or `XMLHttpRequest`. `test/no-egress.test.js` enforces this, and CI also runs the CLI inside a network namespace with no network. Never weaken either check.
 - **Zero runtime dependencies and no install scripts** (`preinstall`, `install`, `postinstall`). Dev tooling must not change that.
 - **Aggregates only.** Output contains counts, shares and version strings. It never contains commands, file paths, rule bodies, prompts or secret values. A submitted card must be safe to paste publicly.
+- **`fix` writes only with `--write`.** It copies every file into `~/.claude/vetobench-backups/<time>/` first (folder 700, files 600), removes only elements of `permissions.allow` (every other byte stays), leaves a project's shared `.claude/settings.json` alone unless `--include-shared`, and prints counts only. Apart from it, the CLI only reads, except `--svg`, which writes the image file the user names.
 - **Never commit real transcripts, labels or commands.** Fixtures in `test/fixtures/` are synthetic and hand-written. The private corpus lives in `~/agent-corpus-snapshots/` and the labels in `~/agent-corpus-snapshots/labels/`, both outside this repo.
 - **Fully abstracted publishing.** Docs, posts and examples never name the author's clients, their products, colleagues, hosts or tickets. Run `python3 -I ~/Projects/agentguard-research/scripts/publish_guard.py <file>` on every doc and post before it goes public.
 - **Every public number is reproducible.** Each one gets a line in `CLAIMS.md`: the claim, measured or estimated, the corpus window, and the exact command. Never ship a number that cannot be replayed. Corrections go in the changelog as retractions.
@@ -28,6 +29,7 @@ Open source (Apache-2.0), no paid product. Built in public on X and LinkedIn.
 
 - `node --test`: all tests.
 - `node bin/vetobench.js [dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--json]`: run the card.
+- `node bin/vetobench.js replay` and `node bin/vetobench.js fix` (a dry run; `--write` applies it): see `--help` of each.
 
 ## Context
 

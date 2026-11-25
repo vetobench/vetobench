@@ -32,11 +32,20 @@ The `vetobench` package on npm is still a placeholder, so for now run it straigh
 - **Who approved each action:** a static allow-rule, the AI classifier (auto mode), or you through a permission prompt. In my 30 days, static allow-rules approved 72.7%, the classifier 26.7%, and I approved 12 actions.
 - **Where the agent was running:** interactive main sessions, loops (`/loop`, `/goal`) and subagents. 69.2% of my agent's actions ran inside subagents and 2.5% in loops, and I approved none of them. All 12 of my approvals came from interactive main sessions.
 - **Wildcard rules doing the work:** how many shell actions went through only because of a broad rule like `git:*` or `python3:*`. For me, more than 29,000 in 30 days (an estimate, and a lower bound).
-- **Allow-rules that never fired:** the shell allow-rules in your global and project settings that never approved a command in the window. Before my cleanup, 88% of mine had not approved a single command in 30 days (an estimate).
+- **Allow-rules that never fired:** the shell allow-rules in your global and project settings that never approved a command in the window. Before my cleanup, about 85% of mine had not approved a single command in 30 days (an estimate).
 - **Secrets left in plain text:** with `--secrets`, counts of passwords, keys and tokens sitting in your transcripts, by category. No value is ever printed or written.
 - **What a guard policy would have asked:** `replay` runs an "ask before production writes, CI triggers and pushes to main" policy over the shell commands your agent ran, and shows how often it would have asked and how many times a day. My own version of that policy would have asked 15 times in 30 days, over 173,959 shell commands.
 
 Every number above comes from my own transcripts for 2026-10-22 to 2026-11-20 and has a line in [CLAIMS.md](CLAIMS.md) with the exact command behind it. [METHODOLOGY.md](METHODOLOGY.md) defines each term.
+
+## Clean up your rules
+
+```sh
+npx github:vetobench/vetobench fix           # a dry run: counts what it would remove
+npx github:vetobench/vetobench fix --write   # removes them, after backing each file up
+```
+
+`fix` removes allow-rules that hold a secret, broad wildcards on an interpreter or remote command (`python3:*`, `ssh:*`, `git:*` and similar), and shell rules that never approved a command in your transcript history. It changes only `permissions.allow` in your own settings: `~/.claude/settings.json` and each project's `settings.local.json`. A project's shared `.claude/settings.json` stays as it is unless you pass `--include-shared`. Every file is copied into `~/.claude/vetobench-backups/` first, readable only by you, only the `allow` array is edited (the rest of the file stays byte for byte), and the output is counts only. A rule is only called never-used with at least 14 days of history in its project, and rules with a mid-rule wildcard, `&&`, `|`, a heredoc or a leading `VAR=value` never are. A removed rule you still need comes back the next time you approve it. Keep wildcards or never-used rules with `--keep-wildcards` and `--keep-unused`.
 
 ## What you'll see
 
@@ -65,7 +74,7 @@ Where the agent was running:
 
 ## Is it safe to run?
 
-vetobench reads files on your machine and prints counts. That is all it does, and you can check each part:
+vetobench reads files on your machine and prints counts. The exceptions: `--svg` writes the image file you name, and `fix --write` edits your own settings files after backing each one up. You can check each part:
 
 - **No network code ships.** [`test/no-egress.test.js`](test/no-egress.test.js) fails if anything in `bin/` or `src/` imports a module that can reach the network or start another program (`http`, `https`, `net`, `tls`, `dgram`, `dns`, `child_process` and a few more), loads a module by a computed name, or calls `fetch`, `WebSocket`, `XMLHttpRequest` or `EventSource`.
 - **CI runs every mode with no network.** Each mode of the CLI runs inside a Linux network namespace with no network, on Node 18, 20 and 22. See [`ci.yml`](.github/workflows/ci.yml).
@@ -100,6 +109,7 @@ npx github:vetobench/vetobench [transcripts-dir] [options]
   --md / --share / --svg FILE    share formats, see below
 
 npx github:vetobench/vetobench replay [transcripts-dir] [--since] [--until] [--policy FILE] [--json]
+npx github:vetobench/vetobench fix [transcripts-dir] [--write] [--include-shared] [--keep-wildcards] [--keep-unused] [--since] [--until] [--json]
 ```
 
 The default directory is `~/.claude/projects`. Each tool call is counted once, even when a resumed session copied it into another transcript. The card also audits your allow-rules: it reads your global settings and those of every project your sessions ran in, and counts the shell rules that never approved a command in the window. Claude Code records a permission decision for each tool call from about v2.1.306 onward.

@@ -99,12 +99,15 @@ function newTotals() {
 
 // Cross-file state, keyed by tool_use id: tool names, Bash commands awaiting their result, and the ids already counted.
 // Shared across files because a resumed or forked session can put a tool call and a copy of its result in different
-// transcripts. cwds: the working folders of counted decisions, used only to find each project's settings files.
+// transcripts. cwds: the working folders of counted decisions, used only to find each project's settings files;
+// dirDays: the first and last day of a counted decision per folder. folderLaunch: the launch folder learned per
+// transcript folder. orphans: rule-approved calls whose decision came before their tool call (another transcript).
 // Non-enumerable, so none of it can reach --json or a renderer.
 function withState(totals) {
   if (!totals.state) {
     Object.defineProperty(totals, 'state', { enumerable: false,
-      value: { toolNames: new Map(), commands: new Map(), results: new Set(), decided: new Set(), cwds: new Set(), launch: new Map() } })
+      value: { toolNames: new Map(), commands: new Map(), results: new Set(), decided: new Set(), cwds: new Set(), launch: new Map(),
+        folderLaunch: new Map(), dirDays: new Map(), orphans: new Map() } })
   }
   return totals
 }
@@ -125,22 +128,49 @@ const encodeDir = (p) => p.replace(/[^A-Za-z0-9]/g, '-')
 
 /**
  * The folder a record's session was launched from: the nearest folder at or above the record's cwd whose encoding is
- * the transcript folder's name (a subagent working in a worktree still runs under its session's settings). Falls back
- * to the cwd itself. Cached per (transcript folder, cwd); paths stay in memory.
+ * the transcript folder's name (a subagent working in a worktree still runs under its session's settings). A record
+ * whose cwd maps to nothing (it moved outside the launch folder, a sibling worktree) or that has no cwd gets the launch
+ * folder already learned for its transcript folder; failing that, its own cwd. Cached; paths stay in memory.
  */
-function sessionDir(cwd, folder, cache) {
-  if (typeof cwd !== 'string' || !cwd) return undefined
-  if (!folder) return cwd
+/**
+ * The folder a transcript folder's name encodes, found by walking the filesystem from / and following only entries
+ * whose encoded name continues the folder name. Null when the folder no longer exists or the name is not a POSIX
+ * path. This does not depend on the order transcripts are read in.
+ */
+export function decodeLaunch(folder) {
+  if (typeof folder !== 'string' || !folder.startsWith('-')) return null
+  const walk = (dir, sofar) => {
+    if (sofar === folder) return dir
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return null }
+    for (const e of entries) {
+      if (!e.isDirectory() && !e.isSymbolicLink()) continue
+      const next = sofar + '-' + encodeDir(e.name)
+      if (next === folder || folder.startsWith(next + '-')) {
+        const found = walk(join(dir, e.name), next)
+        if (found) return found
+      }
+    }
+    return null
+  }
+  return walk('/', '')
+}
+
+function sessionDir(cwd, folder, cache, folderLaunch) {
+  const hasCwd = typeof cwd === 'string' && cwd !== ''
+  if (!folder) return hasCwd ? cwd : undefined
+  if (!hasCwd) return folderLaunch.get(folder)
   const k = folder + '\0' + cwd
   if (!cache.has(k)) {
-    let found = cwd
+    let found = null
     for (let d = cwd; ; d = dirname(d)) {
       if (encodeDir(d) === folder) { found = d; break }
       if (dirname(d) === d) break
     }
     cache.set(k, found)
+    if (found && !folderLaunch.has(folder)) folderLaunch.set(folder, found)
   }
-  return cache.get(k)
+  return cache.get(k) || folderLaunch.get(folder) || cwd
 }
 
 function addShape(totals, shape, gate, n = 1) {
@@ -158,11 +188,15 @@ const textOf = (content) => typeof content === 'string' ? content
  * attribution.js); dir is the folder the record's session was launched from (sessionDir), or undefined.
  */
 export async function scanFile(path, totals, { since = null, until = null, attribute = null, root = null } = {}) {
-  const { toolNames, commands, results, decided, cwds, launch } = withState(totals).state
+  const { toolNames, commands, results, decided, cwds, launch, folderLaunch, dirDays, orphans } = withState(totals).state
   // Only path segments below the scanned directory count, so a parent folder named "subagents" changes nothing.
   const below = (root ? relative(root, path) : path).split(sep)
   const isSubagentFile = below.includes('subagents')
   const folder = root && below.length > 1 ? below[0] : null // the transcript folder that names the launch folder
+  if (folder && !folderLaunch.has(folder)) {
+    const decoded = decodeLaunch(folder)
+    if (decoded) folderLaunch.set(folder, decoded)
+  }
   const mainGates = {} // main-thread decisions; their shape (interactive or loop) is known only after the whole file
   let ranLoop = false
   totals.files += 1
@@ -197,6 +231,13 @@ export async function scanFile(path, totals, { since = null, until = null, attri
           if (b.id && b.name) toolNames.set(b.id, b.name)
           if (LOOP_TOOLS.has(b.name)) ranLoop = true
           if (attribute && b.name === 'Bash' && !decided.has(b.id)) commands.set(b.id, b.input && b.input.command)
+          else if (attribute && b.name === 'Bash' && orphans.has(b.id)) {
+            // Its rule approval was counted from another transcript before this tool call was seen. Match it now so the
+            // rule counts as used; the wildcard totals stay as they were, so published counts replay unchanged.
+            const command = b.input && b.input.command
+            if (typeof command === 'string' && command) attribute(command, orphans.get(b.id))
+            orphans.delete(b.id)
+          }
         }
         continue
       }
@@ -227,8 +268,16 @@ export async function scanFile(path, totals, { since = null, until = null, attri
         const command = commands.get(id)
         commands.delete(id) // held only until its decision is counted
         totals.withDecision += 1
-        const dir = sessionDir(o.cwd, folder, launch)
-        if (dir) cwds.add(dir)
+        const dir = sessionDir(o.cwd, folder, launch, folderLaunch)
+        if (dir) {
+          cwds.add(dir)
+          if (DAY.test(day)) {
+            const span = dirDays.get(dir)
+            if (!span) dirDays.set(dir, [day, day])
+            else if (day < span[0]) span[0] = day
+            else if (day > span[1]) span[1] = day
+          }
+        }
         if (o.version) totals.versions[o.version] = (totals.versions[o.version] || 0) + 1
         const tool = toolNames.get(id) || 'unknown'
         const gate = gateOf(pd, tool)
@@ -243,6 +292,8 @@ export async function scanFile(path, totals, { since = null, until = null, attri
           if (families.length) w.actions += 1
           if (wordBoundary) w.wordBoundary += 1
           for (const f of families) if (BROAD.has(f)) w.byFamily[f] = (w.byFamily[f] || 0) + 1 // fixed names only
+        } else if (attribute && (gate === 'rule' || gate === 'rules-compound') && !command && id && !toolNames.has(id)) {
+          orphans.set(id, dir)
         }
       }
     }
@@ -287,6 +338,19 @@ export const SECRET_PATTERNS = [
 ]
 const SECRET = SECRET_PATTERNS.map(([, , rx]) => rx)
 
+/** True when an allow-rule string holds a secret value (any SECRET_PATTERNS shape). */
+export const isSecretRule = (r) => SECRET.some((rx) => rx.test(String(r)))
+
+/** True for a Bash prefix rule on one bare BROAD command (`python3:*`, `ssh *`, `git*`): it allows nearly anything. */
+export function isBroadWildcard(r) {
+  const m = /^Bash\((.*)\)$/s.exec(typeof r === 'string' ? r : '')
+  if (!m) return false
+  const body = m[1].trim()
+  const prefix = body.replace(/(:\*|\s\*|\*)$/, '').trim()
+  const words = prefix.split(/\s+/)
+  return prefix !== body && words.length === 1 && BROAD.has(words[0])
+}
+
 /** Lint permission settings files. Returns counts only, never rule bodies. */
 export function auditSettings(paths) {
   const res = { files: 0, allow: 0, deny: 0, ask: 0, wildcard: 0, secret: 0 }
@@ -300,12 +364,8 @@ export function auditSettings(paths) {
     res.ask += (perm.ask || []).length
     for (const r of perm.allow || []) {
       res.allow += 1
-      if (SECRET.some((rx) => rx.test(r))) res.secret += 1
-      const m = /^Bash\((.*)\)$/s.exec(r)
-      if (!m) continue
-      const body = m[1].trim()
-      const prefix = body.replace(/(:\*|\s\*|\*)$/, '').trim()
-      if (prefix !== body && BROAD.has(prefix.split(/\s+/)[0]) && prefix.split(/\s+/).length === 1) res.wildcard += 1
+      if (isSecretRule(r)) res.secret += 1
+      if (isBroadWildcard(r)) res.wildcard += 1
     }
   }
   return res

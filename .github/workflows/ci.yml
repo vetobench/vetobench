@@ -33,3 +33,8 @@ jobs:
           offline node bin/vetobench.js test/fixtures/shapes --svg "$RUNNER_TEMP/card.svg"
           offline node bin/vetobench.js test/fixtures/secrets --secrets
           offline node bin/vetobench.js replay test/fixtures/replay --json
+          # fix: a dry run, then --write, against a throwaway home with synthetic settings
+          mkdir -p "$RUNNER_TEMP/h/.claude"
+          printf '{"permissions":{"allow":["Bash(python3:*)","Bash(git status)"]}}\n' > "$RUNNER_TEMP/h/.claude/settings.json"
+          offline env HOME="$RUNNER_TEMP/h" node bin/vetobench.js fix test/fixtures/projects --json
+          offline env HOME="$RUNNER_TEMP/h" node bin/vetobench.js fix test/fixtures/projects --write

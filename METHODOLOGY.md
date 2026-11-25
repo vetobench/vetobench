@@ -78,6 +78,24 @@ The rules line ("Your allow-rules now") and wildcard attribution read your curre
 - Other rules (`Read`, `WebFetch(domain:…)`, MCP tools) are not checked, so they are not in M.
 - The count is for your *current* rules against past commands, so a rule added recently has had less time to match. With `--rules`, the count covers the given files, pooled.
 
+## Fix (`vetobench fix`)
+
+`fix` removes allow-rules from your current settings. Without `--write` it only counts.
+
+- **Files:** the settings files of [Settings files](#settings-files), except a project's `.claude/settings.json`, which is usually committed and shared with a team. Those change only with `--include-shared`.
+- **What it removes**, in this order of precedence (a rule is counted once):
+  1. **A secret inside the rule:** any shape in `SECRET_PATTERNS`, in any kind of rule. A `$VARIABLE` or `${VARIABLE}` in place of the value is a reference, not a secret.
+  2. **A broad wildcard:** a `Bash(...)` prefix rule on one bare command from `BROAD` (`python3:*`, `ssh *`, `git*`). Skip with `--keep-wildcards`.
+  3. **Never fired:** a `Bash(...)` rule that approved no command in the window (see [Unused rules](#unused-rules)). Skip with `--keep-unused`. It is judged only when all of these hold:
+     - the transcripts span at least 14 days, and at least 90% of tool calls carry a recorded decision (older Claude Code versions did not record them);
+     - for a project's file, that project's own sessions span at least 14 days (the global file uses the whole window);
+     - the rule is a plain command or ends in its only wildcard. Rules with a wildcard elsewhere, `&&`, `||`, `;`, `|`, a newline, a heredoc, a substitution or a leading `NAME=value` can approve commands this matcher never pairs with them, so they are never called unused;
+     - the file still holds the rules the scan matched against (it did not change during the run).
+- **Approvals the matcher cannot read:** when part of a rule-approved command matches no rule, the part is cleaned up and matched again: brackets of a subshell, quoted `FOO="a b"` prefixes and wrappers such as `timeout 30`, `nohup` or `env` are removed, and each `$(...)` substitution is matched on its own. If still nothing matches, every rule for the part's own command word counts as used. Lines of a multi-line script (`const x = 1`) never mark a rule. A record whose working folder does not lead to its session's launch folder (or that has none) is placed in the launch folder that the transcript folder's name encodes (found on disk, so the order transcripts are read in does not matter), and a rule approval recorded before its tool call (in another transcript) is matched when the tool call appears.
+- **Writing (`--write`):** each file is re-read and left alone if it changed since the plan, if it cannot be written (read-only), or if it is not valid UTF-8. Otherwise its bytes are copied into `~/.claude/vetobench-backups/<UTC time>/` (folder mode 700, files 600), and `MANIFEST.json` there names each original before that original changes. Backups never land inside a project; if `~/.claude` itself lives in a git repository (a dotfiles repo), `fix` says so. Only the elements of the `permissions.allow` array are removed: every byte outside that array stays, including formatting, comments, a BOM, line endings and number spelling. Inside the array, kept elements are joined with the array's own separator, so a comment between elements can be lost. The result goes to a temporary file in the same folder with the original's mode and is renamed over it. A symlinked file is written through to its target and the link stays; a hard-linked file is rewritten in place so the link stays. The command exits with status 1 when a planned file was left unchanged.
+- **Output:** counts only, like the card. No rule, path or secret is printed. Compare a backup with its file to see what was removed, then delete the backup: it still holds any removed secret.
+- **Limits:** "never fired" uses reconstructed rule matching (see Wildcard attribution), so it is an estimate. A rule removed by mistake costs one prompt: approve it again and it comes back.
+
 ## Known limits
 
 - **Approvals given in chat** ("go ahead", "post it") are invisible to this field and not counted.

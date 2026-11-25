@@ -11,8 +11,15 @@ const W = `[${WS}]`
 const HEREDOC = new RegExp(`<<-?${W}*(['"]?)([\\p{L}\\p{N}_]+)\\1[^\\n]*\\n.*?\\n${W}*\\2${W}*(?=\\n|$)`, 'gsu')
 const SPLIT = new RegExp(`${W}*(?:&&|\\|\\||;|\\||\\n)${W}*`, 'u')
 const ENV = new RegExp(`^(?:[A-Za-z_][A-Za-z0-9_]*=[^${WS}]*${W}+)+`, 'u')
-const EDGES = new RegExp(`^${W}+|${W}+$`, 'gu')
-const strip = (s) => s.replace(EDGES, '')
+const ONE_WS = new RegExp(`^${W}$`, 'u')
+/** Python's str.strip(), in linear time (a regex with a trailing whitespace run is quadratic on long runs). */
+const strip = (s) => {
+  let a = 0
+  let b = s.length
+  while (a < b && ONE_WS.test(s[a])) a++
+  while (b > a && ONE_WS.test(s[b - 1])) b--
+  return s.slice(a, b)
+}
 
 /**
  * One allow-rule string to { prefix, boundary, body }, or null if it is not a Bash(...) rule.
@@ -37,15 +44,53 @@ export function loadAllowRules(paths) {
     try { s = JSON.parse(readFileSync(p, 'utf8')) } catch { unreadable += 1; continue }
     const allow = s && s.permissions && s.permissions.allow
     if (!Array.isArray(allow)) continue
-    for (const r of allow) {
+    allow.forEach((r, index) => {
       const rule = parseRule(r)
-      if (rule) rules.push(rule)
-    }
+      if (rule) rules.push({ ...rule, index }) // index: the rule's place in permissions.allow, for vetobench fix
+    })
   }
   return { rules, unreadable }
 }
 
 const SPECIFIC = Symbol('specific')
+// The command a rule is about: its first word (`npm` for `npm run test:*`, `git` for `git * main`).
+const ruleWord = (r) => r.body.trim().split(/[\s:*]+/, 1)[0]
+
+// Wrappers Claude Code looks through but this splitter does not: `timeout 30 npm test` is about `npm test`.
+const WRAPPER = new RegExp(`^(?:(?:g?timeout)(?:${W}+-\\S+)*${W}+\\S+|nohup|time|command|exec|builtin|nice(?:${W}+-n${W}*-?\\d+|${W}+-\\d+)?|env(?:${W}+-\\S+)*|stdbuf(?:${W}+-\\S+)*)${W}+`, 'u')
+const QUOTED_ENV = new RegExp(`^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^${WS}]*)${W}+)+`, 'u')
+
+/** What a misread part may really be: the part without grouping, quoted env values and wrappers, plus each substitution. */
+function candidates(part) {
+  const subs = []
+  let s = strip(part).replace(/\$\(([^()]*)\)|`([^`]*)`/g, (_, a, b) => { subs.push(a ?? b); return '' })
+  s = strip(s.replace(/^[({]+/, '').replace(/[)}]+$/, '')).replace(QUOTED_ENV, '')
+  for (let k = 0; k < 4; k++) {
+    const next = s.replace(WRAPPER, '')
+    if (next === s) break
+    s = next
+  }
+  return [s, ...subs]
+}
+
+/**
+ * A part of a rule-approved command that no rule explains: the reconstruction misread it, or the approving rule has a
+ * shape this matcher does not model. Claude Code did approve it by some rule. First the part is cleaned up (grouping,
+ * quoted env values, wrappers such as `timeout 30`, substitutions) and matched again; the rules that match are used.
+ * If still nothing matches, every rule for the part's own command word counts as used: it may be the one.
+ */
+function markPossible(part, rules, used) {
+  let hit = false
+  for (const c of candidates(part)) {
+    const m = c && matchPart(c, rules, used)
+    if (m && (m[0] || m[1])) hit = true
+  }
+  if (hit) return
+  // Only the part's own command word: a misread multi-line command also yields lines of code ("const x = 1") as parts,
+  // and their words must not mark rules.
+  const word = (candidates(part)[0] || '').split(/\s+/, 1)[0]
+  if (word) for (const r of rules) if (ruleWord(r) === word) used.add(r)
+}
 // Any non-wildcard match outranks a wildcard: that rule alone would have approved the part. Among wildcards, the
 // longest prefix names the family (python3 over python).
 const better = (a, b) => (a === SPECIFIC || b === SPECIFIC ? SPECIFIC : !a || b.length > a.length ? b : a)
@@ -83,6 +128,7 @@ export function attributeCommand(command, rules, used = null) {
   let wordBoundary = false
   for (const part of String(command).replace(HEREDOC, '<<HEREDOC').split(SPLIT)) {
     const m = matchPart(part, rules, used)
+    if (used && m && !m[1]) markPossible(part, rules, used) // no rule matches it the way Claude Code would
     if (!m) continue
     if (m[0] && m[0] !== SPECIFIC) families.add(m[0])
     if (m[1] && m[1] !== SPECIFIC) wordBoundary = true

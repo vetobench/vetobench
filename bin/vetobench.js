@@ -9,6 +9,7 @@ import { loadAllowRules, attributeCommand } from '../src/attribution.js'
 import { ruleScopes } from '../src/settings.js'
 import { SECRET_CATEGORIES, scanSecrets } from '../src/secrets.js'
 import { replayCommand } from '../src/replay.js'
+import { fixCommand } from '../src/fix.js'
 
 const VERSION = '0.0.1'
 const HELP = `vetobench ${VERSION}: who approved your coding agent's actions?
@@ -26,6 +27,7 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
   --secrets         also count passwords, keys and tokens left in the transcripts (reads every line: slower)
 
   replay            how often "ask before production writes" would have asked (vetobench replay --help)
+  fix               remove secret, wildcard and never-used allow-rules; a dry run unless --write (vetobench fix --help)
 
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
@@ -160,6 +162,13 @@ function writeSvg(file, svg, force) {
 async function main() {
   if (process.argv[2] === 'replay') {
     return console.log(await replayCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects') }))
+  }
+  if (process.argv[2] === 'fix') {
+    const { text, code } = await fixCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects'),
+      home: homedir(), cwd: process.cwd() })
+    console.log(text)
+    process.exitCode = code
+    return
   }
   const o = parseArgs(process.argv.slice(2))
   if (o.help) return console.log(HELP)
