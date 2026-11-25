@@ -17,6 +17,8 @@ Open source (Apache-2.0), no paid product. Built in public on X and LinkedIn.
 - **Every public number is reproducible.** Each one gets a line in `CLAIMS.md`: the claim, measured or estimated, the corpus window, and the exact command. Never ship a number that cannot be replayed. Corrections go in the changelog as retractions.
 - **Credibility over reach.** No vote rings, no star trading, no "security" claims for heuristics. Guard authors get their numbers 14 days before publication, with a right of reply.
 
+- **`main` is protected.** Changes land through a pull request after CI (`test (18)`, `test (20)`, `test (22)`) and CodeQL (`analyze`) pass on an up-to-date branch. No direct pushes, no force-pushes, no deletion, no bypass. Releases: push a `v*` tag on `main`.
+
 ## Layout
 
 - `bin/vetobench.js`: CLI entry point (argument parsing, output).
