@@ -1,0 +1,44 @@
+# vetobench check-settings as a composite action: fails the job when the repository's committed Claude Code settings
+# allow a secret, a broad wildcard (python3:*, ssh:*, git:* ...) or every shell command. It runs the vetobench code of
+# the same ref as this action (zero dependencies, so nothing is installed), reads only the settings files in the
+# checked-out workspace, and prints counts only. Usage: action/README.md.
+name: vetobench check-settings
+description: Fail when committed Claude Code settings allow a secret, a broad wildcard or bare Bash. Counts only, no network.
+author: vetobench
+inputs:
+  files:
+    description: >-
+      Settings files to check, relative to the workspace, separated by spaces or newlines (no spaces inside a path).
+      Default: .claude/settings.json and .claude/settings.local.json, if present.
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Check Node.js 18 or later
+      shell: bash
+      run: |
+        if ! command -v node >/dev/null; then
+          echo "::error title=vetobench::Node.js not found. Add actions/setup-node before this action."
+          exit 1
+        fi
+        major="$(node -p 'process.versions.node.split(".")[0]')"
+        if [ "$major" -lt 18 ]; then
+          echo "::error title=vetobench::Node.js 18 or later is needed (found $(node --version))."
+          exit 1
+        fi
+    - name: Check the committed settings
+      shell: bash
+      env:
+        # The input reaches the script through the environment, never pasted into it.
+        FILES: ${{ inputs.files }}
+      run: |
+        set -f # no globbing: each word of FILES is one path
+        args=()
+        for f in $FILES; do
+          case "$f" in
+            -*) echo "::error title=vetobench::files: a path may not start with '-'"; exit 1 ;;
+          esac
+          args+=("$f")
+        done
+        node "$GITHUB_ACTION_PATH/../bin/vetobench.js" check-settings "${args[@]}"

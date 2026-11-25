@@ -38,3 +38,35 @@ jobs:
           printf '{"permissions":{"allow":["Bash(python3:*)","Bash(git status)"]}}\n' > "$RUNNER_TEMP/h/.claude/settings.json"
           offline env HOME="$RUNNER_TEMP/h" node bin/vetobench.js fix test/fixtures/projects --json
           offline env HOME="$RUNNER_TEMP/h" node bin/vetobench.js fix test/fixtures/projects --write
+          # check-settings: clean settings pass, risky ones must fail
+          offline node bin/vetobench.js check-settings test/fixtures/check-settings/clean.json --json
+          if offline node bin/vetobench.js check-settings test/fixtures/check-settings/risky.json; then
+            echo "::error::check-settings passed the risky fixture"
+            exit 1
+          fi
+  action:
+    # The composite action in action/, used the way a caller's workflow uses it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: No settings in the repository root, so nothing to check
+        uses: ./action
+      - name: Clean settings pass
+        uses: ./action
+        with:
+          files: test/fixtures/check-settings/clean.json
+      - name: Risky settings fail
+        id: risky
+        continue-on-error: true
+        uses: ./action
+        with:
+          files: test/fixtures/check-settings/risky.json
+      - name: Expect the risky check to have failed
+        env:
+          OUTCOME: ${{ steps.risky.outcome }}
+        run: test "$OUTCOME" = failure

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test)",
+      "Bash(npm run lint:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(PGPASSWORD=$PGPASSWORD psql -h localhost -c 'select 1')",
+      "Read",
+      "Edit"
+    ],
+    "deny": ["Bash(git push:*)"]
+  }
+}
