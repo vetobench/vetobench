@@ -1,7 +1,6 @@
 {
   "name": "vetobench",
-  "version": "0.0.1",
-  "private": true,
+  "version": "0.1.0",
   "description": "Who approved your coding agent's actions? A local, zero-network report from your agent transcripts, and an open benchmark of permission guards.",
   "type": "module",
   "bin": {
@@ -24,10 +23,14 @@
     "claude-code",
     "ai-agents",
     "permissions",
-    "security",
+    "guardrails",
     "benchmark",
     "coding-agents"
   ],
+  "homepage": "https://github.com/vetobench/vetobench#readme",
+  "bugs": {
+    "url": "https://github.com/vetobench/vetobench/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/vetobench/vetobench.git"

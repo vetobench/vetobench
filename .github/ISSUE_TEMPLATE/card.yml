@@ -16,7 +16,7 @@ body:
       placeholder: |
         ### Who approved my coding agent's actions?
 
-        vetobench 0.0.1 · 2026-11-01 to 2026-11-30 · ...
+        vetobench 0.1.0 · 2026-11-01 to 2026-11-30 · ...
     validations:
       required: true
   - type: input

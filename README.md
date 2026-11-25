@@ -20,12 +20,11 @@ Static allow-rules and an AI classifier approved almost all the rest. vetobench 
 ## Run it on your own agent
 
 ```sh
-npx github:vetobench/vetobench
+npx vetobench
 ```
 
 You need Node 18 or later. It reads the Claude Code transcripts in `~/.claude/projects` and prints the card in your terminal. Nothing is sent anywhere.
 
-The `vetobench` package on npm is still a placeholder, so for now run it straight from this repository; after the npm release the command will be `npx vetobench`.
 
 ## What it finds
 
@@ -41,8 +40,8 @@ Every number above comes from my own transcripts for 2026-10-22 to 2026-11-20 an
 ## Clean up your rules
 
 ```sh
-npx github:vetobench/vetobench fix           # a dry run: counts what it would remove
-npx github:vetobench/vetobench fix --write   # removes them, after backing each file up
+npx vetobench fix           # a dry run: counts what it would remove
+npx vetobench fix --write   # removes them, after backing each file up
 ```
 
 `fix` removes allow-rules that hold a secret, broad wildcards on an interpreter or remote command (`python3:*`, `ssh:*`, `git:*` and similar), and shell rules that never approved a command in your transcript history. It changes only `permissions.allow` in your own settings: `~/.claude/settings.json` and each project's `settings.local.json`. A project's shared `.claude/settings.json` stays as it is unless you pass `--include-shared`. Every file is copied into `~/.claude/vetobench-backups/` first, readable only by you, only the `allow` array is edited (the rest of the file stays byte for byte), and the output is counts only. A rule is only called never-used with at least 14 days of history in its project, and rules with a mid-rule wildcard, `&&`, `|`, a heredoc or a leading `VAR=value` never are. A removed rule you still need comes back the next time you approve it. Keep wildcards or never-used rules with `--keep-wildcards` and `--keep-unused`.
@@ -53,7 +52,7 @@ npx github:vetobench/vetobench fix --write   # removes them, after backing each 
 <summary>My card in the terminal, same 30 days</summary>
 
 ```
-vetobench 0.0.1: who approved your agent's actions
+vetobench 0.1.0: who approved your agent's actions
 1,744 transcripts · 2026-10-22 to 2026-11-20 · 236,734 of 237,087 tool calls carry a recorded decision
 
   Static allow-rules (compound command)                 116,860    49.4%
@@ -99,7 +98,7 @@ vetobench is built in public. Progress, new numbers and the benchmark go out on 
 ## Options
 
 ```
-npx github:vetobench/vetobench [transcripts-dir] [options]
+npx vetobench [transcripts-dir] [options]
 
   --since / --until YYYY-MM-DD   window by UTC day (until is exclusive)
   --rules FILE                   match approvals against this settings file's allow-rules instead of your
@@ -108,8 +107,8 @@ npx github:vetobench/vetobench [transcripts-dir] [options]
   --json                         aggregates as JSON (counts only)
   --md / --share / --svg FILE    share formats, see below
 
-npx github:vetobench/vetobench replay [transcripts-dir] [--since] [--until] [--policy FILE] [--json]
-npx github:vetobench/vetobench fix [transcripts-dir] [--write] [--include-shared] [--keep-wildcards] [--keep-unused] [--since] [--until] [--json]
+npx vetobench replay [transcripts-dir] [--since] [--until] [--policy FILE] [--json]
+npx vetobench fix [transcripts-dir] [--write] [--include-shared] [--keep-wildcards] [--keep-unused] [--since] [--until] [--json]
 ```
 
 The default directory is `~/.claude/projects`. Each tool call is counted once, even when a resumed session copied it into another transcript. The card also audits your allow-rules: it reads your global settings and those of every project your sessions ran in, and counts the shell rules that never approved a command in the window. Claude Code records a permission decision for each tool call from about v2.1.306 onward.
@@ -117,9 +116,9 @@ The default directory is `~/.claude/projects`. Each tool call is counted once, e
 ## Share your card
 
 ```
-npx github:vetobench/vetobench --md               # the card as markdown
-npx github:vetobench/vetobench --svg card.svg     # also write a 1200×630 image for posts (--force replaces the file)
-npx github:vetobench/vetobench --share            # the markdown, then a link to a prefilled "Submit your card" issue
+npx vetobench --md               # the card as markdown
+npx vetobench --svg card.svg     # also write a 1200×630 image for posts (--force replaces the file)
+npx vetobench --share            # the markdown, then a link to a prefilled "Submit your card" issue
 ```
 
 Every format holds counts, shares, dates and version strings only. vetobench never opens the link and sends nothing: read the card, then open the link yourself. Most social sites want PNG, so open the SVG in a browser and screenshot it, or convert it with any SVG tool.
@@ -127,7 +126,7 @@ Every format holds counts, shares, dates and version strings only. vetobench nev
 ## Replay a guard policy
 
 ```
-npx github:vetobench/vetobench replay [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--policy file] [--labels file] [--json]
+npx vetobench replay [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--policy file] [--labels file] [--json]
 ```
 
 Replays an "ask before production writes, CI triggers and pushes to main" policy against the shell commands your agent actually ran. It prints how often the policy would have asked, per category: pushes to main, CI triggers, remote writes over ssh, SQL writes to non-local databases, Kubernetes, Terraform, cloud changes and more. Put your own hosts, protected branches and extra rules in a JSON file and pass it with `--policy`. It also shows the asks per day, because a prompt you see rarely still gets read. Pass your own verdicts with `--labels` to count right and wrong asks. The format is in [METHODOLOGY.md](METHODOLOGY.md#replay-vetobench-replay). Like the card, it prints counts only, never a command.

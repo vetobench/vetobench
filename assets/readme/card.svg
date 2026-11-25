@@ -40,6 +40,6 @@
   <text x="776" y="424" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="96" font-weight="700" fill="#FF5A1F">12</text>
   <text x="776" y="470" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="26" fill="#8E8E94">human approvals</text>
   <path d="M72 520H1128" stroke="#8E8E94" stroke-opacity="0.35" stroke-width="2"/>
-  <text x="72" y="568" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="24" fill="#8E8E94">vetobench 0.0.1 · local, nothing left my machine</text>
+  <text x="72" y="568" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="24" fill="#8E8E94">vetobench 0.1.0 · local, nothing left my machine</text>
   <text x="1128" y="568" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="22" fill="#8E8E94">236,734 recorded decisions</text>
 </svg>

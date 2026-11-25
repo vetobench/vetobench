@@ -2,7 +2,7 @@
 // vetobench: who approved your coding agent's actions? Local only: this program makes no network calls.
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { existsSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { GATES, SHAPES, scanAll, auditSettings } from '../src/analyze.js'
 import { renderMarkdown, renderShare, renderSvg, unusedLine } from '../src/render.js'
 import { loadAllowRules, attributeCommand } from '../src/attribution.js'
@@ -11,7 +11,8 @@ import { SECRET_CATEGORIES, scanSecrets } from '../src/secrets.js'
 import { replayCommand } from '../src/replay.js'
 import { fixCommand } from '../src/fix.js'
 
-const VERSION = '0.0.1'
+// One source of truth: the version in package.json (the release workflow checks the tag against it).
+const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 const HELP = `vetobench ${VERSION}: who approved your coding agent's actions?
 
 Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--rules settings.json]... [--json]
