@@ -13,6 +13,7 @@ import { fixCommand } from '../src/fix.js'
 import { checkSettingsCommand } from '../src/check-settings.js'
 import { driftCommand } from '../src/drift.js'
 import { doctorCommand } from '../src/doctor.js'
+import { hookCommand } from '../src/hook.js'
 
 // One source of truth: the version in package.json (the release workflow checks the tag against it).
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
@@ -35,6 +36,7 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
   check-settings    for CI: fail on allow-rules with a secret, a broad wildcard or bare Bash (vetobench check-settings --help)
   drift             who approved your agent's actions, week by week (vetobench drift --help)
   doctor            a checkup of your permission settings in counts; --ci exits 1 on a high finding (vetobench doctor --help)
+  hook              have Claude Code ask you before the commands replay counts; a dry run unless --write (vetobench hook --help)
 
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
@@ -190,6 +192,13 @@ async function main() {
     const { text, code } = await doctorCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects'),
       home: homedir(), cwd: process.cwd() })
     console.log(text)
+    process.exitCode = code
+    return
+  }
+  if (process.argv[2] === 'hook') {
+    // `hook run` is the Claude Code hook itself: it prints the "ask" JSON or nothing, and always exits 0.
+    const { text, code } = await hookCommand(process.argv.slice(3), { version: VERSION, home: homedir(), cwd: process.cwd(), stdin: () => process.stdin })
+    if (text) console.log(text)
     process.exitCode = code
     return
   }
