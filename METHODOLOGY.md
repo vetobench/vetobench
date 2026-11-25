@@ -105,6 +105,7 @@ Each of these follows the same rules as the card: it reads local files, sends no
 - **`graph`** ([docs/graph.md](docs/graph.md)): the card's totals per UTC day, as one self-contained HTML file.
 - **`mcp`** ([docs/mcp.md](docs/mcp.md)): MCP servers from the configuration files Claude Code documents, MCP allow, deny and ask rules, and MCP tool calls by gate.
 - **`hook`** ([docs/hook.md](docs/hook.md)): the `replay` policy run live as a `PreToolUse` hook; it fails open (an error never blocks the agent).
+- **`scrub`** ([docs/scrub.md](docs/scrub.md)): the `SECRET_PATTERNS` of [Secrets left in transcripts](#secrets-left-in-transcripts---secrets), minus `$VARIABLE` references; only the value is replaced, each changed line is parsed again, and files written in the last 10 minutes are left alone. A session whose earlier messages were redacted may not resume on newer models.
 - **`check-settings`** ([action/README.md](action/README.md)): the secret and wildcard checks of `fix`, for committed settings in CI.
 - **Codex CLI** ([docs/codex.md](docs/codex.md)): not supported; its transcripts do not record who approved each tool call.
 

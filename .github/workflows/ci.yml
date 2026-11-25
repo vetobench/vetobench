@@ -35,6 +35,7 @@ jobs:
           offline node bin/vetobench.js test/fixtures/secrets --secrets
           offline node bin/vetobench.js replay test/fixtures/replay --json
           offline node bin/vetobench.js drift test/fixtures/shapes --asks --json
+          offline node bin/vetobench.js scrub test/fixtures/secrets --json
           offline env HOME="$RUNNER_TEMP" node bin/vetobench.js doctor test/fixtures/projects --json
           offline env HOME="$RUNNER_TEMP" node bin/vetobench.js mcp test/fixtures/projects --json
           # hook run: must answer "ask" for a push to main, and stay silent for a harmless command

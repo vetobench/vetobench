@@ -13,6 +13,7 @@ Corrections to published numbers go here as **retractions**: the claim as publis
 - `vetobench graph --html FILE`: a self-contained HTML report of the card over time.
 - `vetobench mcp`: the MCP permission surface (servers by scope and transport, MCP allow-rules, MCP calls by gate), counts only.
 - `vetobench hook`: installs the replay policy as a Claude Code `PreToolUse` hook that asks before production writes, CI triggers and pushes to main. A dry run unless `--write`; backups first.
+- `vetobench scrub`: redacts secret values left in plain text in your transcripts, value by value. A dry run unless `--write`; backups first; open sessions are left alone.
 - `vetobench check-settings` and a GitHub Action (`action/`) that fails CI on committed allow-rules with a secret, a broad wildcard or a bare `Bash` allow.
 - Issue forms (wrong verdict, bug, feature idea), a pull request template, `docs/releasing.md`, and a research note on Codex CLI approvals (`docs/codex.md`).
 - CI runs every new command with networking switched off.

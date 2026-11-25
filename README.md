@@ -55,6 +55,7 @@ npx vetobench fix --write   # removes them, after backing each file up
 | `npx vetobench graph --html report.html` | One self-contained HTML page with the card over time: a daily chart by who approved, a daily chart by where the agent ran, and the totals. No scripts from anywhere, no network. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/graph.md) |
 | `npx vetobench mcp` | Your MCP permission surface: servers by scope and transport, the allow-rules that let their tools run without asking, and who approved the MCP calls in your transcripts. Never a server or tool name. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/mcp.md) |
 | `vetobench hook install` | Puts the `replay` policy in front of your agent as a Claude Code hook: it asks you before production writes, CI triggers and pushes to main. A dry run unless `--write`; needs `npm install -g vetobench`. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/hook.md) |
+| `npx vetobench scrub` | Finds passwords, keys and tokens left in plain text in your transcripts and replaces only the value with `[redacted:<category>]`. A dry run unless `--write`; backups first; open sessions are left alone. Rotate the secrets anyway. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/scrub.md) |
 | `npx vetobench check-settings` | For CI: fails when committed settings allow-rules hold a secret, a broad wildcard or a bare `Bash` allow. Also as a GitHub Action in [`action/`](action/README.md). |
 
 A note on Codex CLI: its transcripts record each tool call but not who approved it, so a Codex card would have to guess. [The research note](https://github.com/vetobench/vetobench/blob/main/docs/codex.md) has the details.
@@ -86,7 +87,7 @@ Where the agent was running:
 
 ## Is it safe to run?
 
-vetobench reads files on your machine and prints counts. The exceptions: `--svg` and `graph --html` write the file you name, and `fix --write` and `hook install --write` edit your own settings files after backing each one up. You can check each part:
+vetobench reads files on your machine and prints counts. The exceptions: `--svg` and `graph --html` write the file you name, `fix --write` and `hook install --write` edit your own settings files, and `scrub --write` edits your transcripts, each after backing the files up. You can check each part:
 
 - **No network code ships.** [`test/no-egress.test.js`](test/no-egress.test.js) fails if anything in `bin/` or `src/` imports a module that can reach the network or start another program (`http`, `https`, `net`, `tls`, `dgram`, `dns`, `child_process` and a few more), loads a module by a computed name, or calls `fetch`, `WebSocket`, `XMLHttpRequest` or `EventSource`.
 - **CI runs every mode with no network.** Each mode of the CLI runs inside a Linux network namespace with no network, on Node 18, 20 and 22. See [`ci.yml`](.github/workflows/ci.yml).
@@ -128,6 +129,7 @@ npx vetobench graph --html FILE [transcripts-dir] [--since] [--until] [--force]
 npx vetobench mcp [transcripts-dir] [--since] [--until] [--json]
 vetobench hook install|uninstall [--write] [--project] [--policy FILE]
 npx vetobench check-settings [file]... [--json]
+npx vetobench scrub [transcripts-dir] [--write] [--since] [--until] [--json]
 ```
 
 The default directory is `~/.claude/projects`. Each tool call is counted once, even when a resumed session copied it into another transcript. The card also audits your allow-rules: it reads your global settings and those of every project your sessions ran in, and counts the shell rules that never approved a command in the window. Claude Code records a permission decision for each tool call from about v2.1.306 onward.
