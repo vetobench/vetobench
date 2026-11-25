@@ -10,6 +10,13 @@ import { ruleScopes } from '../src/settings.js'
 import { SECRET_CATEGORIES, scanSecrets } from '../src/secrets.js'
 import { replayCommand } from '../src/replay.js'
 import { fixCommand } from '../src/fix.js'
+import { checkSettingsCommand } from '../src/check-settings.js'
+import { driftCommand } from '../src/drift.js'
+import { doctorCommand } from '../src/doctor.js'
+import { hookCommand } from '../src/hook.js'
+import { mcpCommand } from '../src/mcp.js'
+import { graphCommand } from '../src/graph.js'
+import { scrubCommand } from '../src/scrub.js'
 
 // One source of truth: the version in package.json (the release workflow checks the tag against it).
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
@@ -29,6 +36,13 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
 
   replay            how often "ask before production writes" would have asked (vetobench replay --help)
   fix               remove secret, wildcard and never-used allow-rules; a dry run unless --write (vetobench fix --help)
+  check-settings    for CI: fail on allow-rules with a secret, a broad wildcard or bare Bash (vetobench check-settings --help)
+  drift             who approved your agent's actions, week by week (vetobench drift --help)
+  doctor            a checkup of your permission settings in counts; --ci exits 1 on a high finding (vetobench doctor --help)
+  hook              have Claude Code ask you before the commands replay counts; a dry run unless --write (vetobench hook --help)
+  mcp               your MCP servers, the rules that allow their tools, and who approved their calls (vetobench mcp --help)
+  graph             a local HTML report of who approved your agent's actions, day by day (vetobench graph --help)
+  scrub             redact secrets left in plain text in your transcripts; a dry run unless --write (vetobench scrub --help)
 
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
@@ -130,9 +144,26 @@ function render(t, rules) {
   }
   if (unused) lines.push(unused)
   lines.push(...secretLines(t.secrets, t.files))
+  lines.push(...nextSteps(t, rules))
   lines.push('')
   lines.push('Not counted: approvals you give in chat. Nothing left this machine.')
   return lines.join('\n')
+}
+
+// What to do about the card: one line per command, shown only when the card found something it would change.
+// No counts here: fix and scrub judge with their own rules, so their numbers can differ from the card's.
+function nextSteps(t, rules) {
+  const out = []
+  if ((t.ruleUse && t.ruleUse.unused) || rules.wildcard || rules.secret) {
+    out.push('  npx vetobench fix        shows which allow-rules it would remove: never used, broad wildcards, secrets inside.')
+    out.push('                           Nothing changes until you add --write; every file is backed up first.')
+  }
+  if (t.secrets && Object.values(t.secrets.byCategory || {}).some(Boolean)) {
+    out.push('  npx vetobench scrub      shows which secret values it would redact in your transcripts (rotate them anyway).')
+  }
+  out.push(`  npx vetobench doctor     a checkup of your permission settings${rules.files && !rules.deny ? ' (you have no deny rules)' : ''}.`)
+  out.push('  vetobench hook install   asks you before production writes, CI triggers and pushes to main.')
+  return ['', 'What you can do next:', ...out]
 }
 
 // Counts per fixed category, never values. Without --secrets, one line says how to get them.
@@ -167,6 +198,41 @@ async function main() {
   if (process.argv[2] === 'fix') {
     const { text, code } = await fixCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects'),
       home: homedir(), cwd: process.cwd() })
+    console.log(text)
+    process.exitCode = code
+    return
+  }
+  if (process.argv[2] === 'check-settings') {
+    const { text, code } = checkSettingsCommand(process.argv.slice(3), { version: VERSION, cwd: process.cwd() })
+    console.log(text)
+    process.exitCode = code
+    return
+  }
+  if (process.argv[2] === 'drift') {
+    return console.log(await driftCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects') }))
+  }
+  if (process.argv[2] === 'doctor') {
+    const { text, code } = await doctorCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects'),
+      home: homedir(), cwd: process.cwd() })
+    console.log(text)
+    process.exitCode = code
+    return
+  }
+  if (process.argv[2] === 'hook') {
+    // `hook run` is the Claude Code hook itself: it prints the "ask" JSON or nothing, and always exits 0.
+    const { text, code } = await hookCommand(process.argv.slice(3), { version: VERSION, home: homedir(), cwd: process.cwd(), stdin: () => process.stdin })
+    if (text) console.log(text)
+    process.exitCode = code
+    return
+  }
+  if (process.argv[2] === 'mcp') {
+    return console.log(await mcpCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects'), home: homedir(), cwd: process.cwd() }))
+  }
+  if (process.argv[2] === 'graph') {
+    return console.log(await graphCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects') }))
+  }
+  if (process.argv[2] === 'scrub') {
+    const { text, code } = await scrubCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects'), home: homedir() })
     console.log(text)
     process.exitCode = code
     return

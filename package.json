@@ -1,6 +1,6 @@
 {
   "name": "vetobench",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Who approved your coding agent's actions? A local, zero-network report from your agent transcripts, and an open benchmark of permission guards.",
   "type": "module",
   "bin": {

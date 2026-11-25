@@ -9,6 +9,7 @@ import { basename, dirname, join } from 'node:path'
 import { scanAll, isBroadWildcard, SECRET_PATTERNS } from './analyze.js'
 import { loadAllowRules, attributeCommand, parseRule } from './attribution.js'
 import { ruleScopes } from './settings.js'
+import { isTooLong } from './rules.js'
 
 /** Too little history makes "never fired" meaningless: below this many days, unused rules are left alone. */
 export const MIN_DAYS = 14
@@ -29,6 +30,7 @@ const daysBetween = (a, b) => (DAY.test(a) && DAY.test(b) ? Math.round((Date.par
  * secret (a database URL whose password is `$DB_PASSWORD`), so such a rule is not removed for it.
  */
 export function holdsSecret(r) {
+  if (isTooLong(r)) return false // never run the secret patterns on a hostile, very long rule (counted elsewhere)
   const text = String(r)
   return SECRET_PATTERNS.some(([, , rx]) => {
     for (const m of text.matchAll(new RegExp(rx.source, rx.flags.includes('g') ? rx.flags : rx.flags + 'g'))) {
@@ -213,7 +215,7 @@ export async function planFix({ dir, since = null, until = null, home, cwd, incl
 }
 
 /** True when a folder (followed through symlinks) lies inside a git working tree, such as a dotfiles repository. */
-function insideGit(dir) {
+export function insideGit(dir) {
   let d
   try { d = realpathSync(dir) } catch { return false }
   for (;;) {
@@ -224,10 +226,10 @@ function insideGit(dir) {
   }
 }
 
-const stamp = (now) => now.toISOString().replace(/[-:]/g, '').replace('Z', '') + 'Z'
+export const stamp = (now) => now.toISOString().replace(/[-:]/g, '').replace('Z', '') + 'Z'
 
 /** Create a file that only the owner can read, failing if it exists. */
-function writePrivate(path, data) {
+export function writePrivate(path, data) {
   const fd = openSync(path, 'wx', 0o600)
   try { writeSync(fd, data) } finally { closeSync(fd) }
 }
@@ -362,6 +364,10 @@ export function renderFix(plan, written, version, { customDir = false } = {}) {
   if (!written) {
     lines.push(r ? `Would remove ${num(r)} of ${num(plan.allow)} allow-rules, from ${num(plan.files.length)} file(s).` : 'Nothing to remove.')
     lines.push(r ? 'Dry run: nothing was changed. Run with --write to apply; each file is backed up first.' : 'Dry run: nothing was changed.')
+    if (plan.remove.secret) {
+      lines.push('Rules with a secret: removing one does not change the secret. Claude Code will ask you once the next time; keep the')
+      lines.push('secret out of the command (an environment variable, ~/.pgpass) before you approve it again, or it is saved again.')
+    }
   } else {
     lines.push(`Removed ${num(written.rules)} of ${num(plan.allow)} allow-rules, from ${num(written.files)} file(s).`)
     if (written.changed) lines.push(`${num(written.changed)} file(s) changed while vetobench ran, so they were left alone: run it again.`)
@@ -372,6 +378,11 @@ export function renderFix(plan, written, version, { customDir = false } = {}) {
       lines.push('Compare a backup with its file to see exactly what was removed. The backups still hold any removed secrets:')
       lines.push('delete them once you have checked, and rotate those secrets. Open Claude Code sessions may keep the old rules')
       lines.push('until you restart them. A removed rule you still need comes back the next time you approve it.')
+    }
+    if (written.rules && plan.remove.secret) {
+      lines.push('About the rules with a secret: nothing happens to the secret itself. The next time the agent runs such a command,')
+      lines.push('Claude Code asks you once; "always allow" would save the secret into a rule again. Move it out of the command first')
+      lines.push('(an environment variable, a .env file the command reads, or ~/.pgpass for Postgres), then allow the command without it.')
     }
   }
   lines.push('')

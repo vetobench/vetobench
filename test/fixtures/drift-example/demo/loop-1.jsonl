@@ -1,0 +1,13 @@
+{"type":"user","timestamp":"2026-10-30T08:00:00Z","message":{"role":"user","content":"<command-name>/loop</command-name>\n<command-args>1h run the tests</command-args>"}}
+{"type":"assistant","timestamp":"2026-10-30T08:00:10Z","message":{"content":[{"type":"tool_use","id":"l01","name":"Bash"}]}}
+{"type":"user","timestamp":"2026-10-30T08:00:11Z","permissionDecision":{"decision":"accept","source":"config","reasonType":"classifier"},"message":{"content":[{"type":"tool_result","tool_use_id":"l01","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-10-31T08:00:10Z","message":{"content":[{"type":"tool_use","id":"l02","name":"Bash"}]}}
+{"type":"user","timestamp":"2026-10-31T08:00:11Z","permissionDecision":{"decision":"accept","source":"config","reasonType":"classifier"},"message":{"content":[{"type":"tool_result","tool_use_id":"l02","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-11-02T08:00:10Z","message":{"content":[{"type":"tool_use","id":"l03","name":"Bash"}]}}
+{"type":"user","timestamp":"2026-11-02T08:00:11Z","permissionDecision":{"decision":"accept","source":"config","reasonType":"classifier"},"message":{"content":[{"type":"tool_result","tool_use_id":"l03","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-11-02T09:00:10Z","message":{"content":[{"type":"tool_use","id":"l04","name":"Bash"}]}}
+{"type":"user","timestamp":"2026-11-02T09:00:11Z","permissionDecision":{"decision":"accept","source":"config","reasonType":"rule"},"message":{"content":[{"type":"tool_result","tool_use_id":"l04","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-11-03T08:00:10Z","message":{"content":[{"type":"tool_use","id":"l05","name":"Bash"}]}}
+{"type":"user","timestamp":"2026-11-03T08:00:11Z","permissionDecision":{"decision":"reject","source":"config","reasonType":"safetyCheck"},"message":{"content":[{"type":"tool_result","tool_use_id":"l05","content":"blocked"}]}}
+{"type":"assistant","timestamp":"2026-11-03T09:00:10Z","message":{"content":[{"type":"tool_use","id":"l06","name":"Bash"}]}}
+{"type":"user","timestamp":"2026-11-03T09:00:11Z","permissionDecision":{"decision":"accept","source":"config","reasonType":"classifier"},"message":{"content":[{"type":"tool_result","tool_use_id":"l06","content":"ok"}]}}

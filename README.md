@@ -44,9 +44,27 @@ npx vetobench fix           # a dry run: counts what it would remove
 npx vetobench fix --write   # removes them, after backing each file up
 ```
 
-`fix` removes allow-rules that hold a secret, broad wildcards on an interpreter or remote command (`python3:*`, `ssh:*`, `git:*` and similar), and shell rules that never approved a command in your transcript history. It changes only `permissions.allow` in your own settings: `~/.claude/settings.json` and each project's `settings.local.json`. A project's shared `.claude/settings.json` stays as it is unless you pass `--include-shared`. Every file is copied into `~/.claude/vetobench-backups/` first, readable only by you, only the `allow` array is edited (the rest of the file stays byte for byte), and the output is counts only. A rule is only called never-used with at least 14 days of history in its project, and rules with a mid-rule wildcard, `&&`, `|`, a heredoc or a leading `VAR=value` never are. A removed rule you still need comes back the next time you approve it. Keep wildcards or never-used rules with `--keep-wildcards` and `--keep-unused`.
+`fix` removes allow-rules that hold a secret, broad wildcards on an interpreter or remote command (`python3:*`, `ssh:*`, `git:*` and similar), and shell rules that never approved a command in your transcript history. It changes only `permissions.allow` in your own settings: `~/.claude/settings.json` and each project's `settings.local.json`. A project's shared `.claude/settings.json` stays as it is unless you pass `--include-shared`. Every file is copied into `~/.claude/vetobench-backups/` first, readable only by you, only the `allow` array is edited (the rest of the file stays byte for byte), and the output is counts only. A rule is only called never-used with at least 14 days of history in its project, and rules with a mid-rule wildcard, `&&`, `|`, a heredoc or a leading `VAR=value` never are. A removed rule you still need comes back the next time you approve it. A rule with a password inside is a special case: removing it does not change the password, and approving the command again with "always allow" saves the password into a new rule. Move the password out of the command first (an environment variable, a `.env` file the command reads, or `~/.pgpass` for Postgres), then allow the command without it. Keep wildcards or never-used rules with `--keep-wildcards` and `--keep-unused`.
+
+## More commands
+
+| Command | What it does |
+|---|---|
+| `npx vetobench doctor` | A checkup of your permission settings: twelve fixed checks (allow-rules with a secret, broad wildcards, a bare `Bash` allow, prompts turned off, MCP servers allowed wholesale, no deny rules and more), each with a level and a count. `--ci` exits 1 on a high finding. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/doctor.md) |
+| `npx vetobench drift` | Who approved your agent's actions, week by week, with each share's change against the week before. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/drift.md) |
+| `npx vetobench graph --html report.html` | One self-contained HTML page with the card over time: a chart by who approved, a chart by where the agent ran, and the totals. Each bar is a UTC day, or a bucket of whole weeks when the window is longer than 92 days. No scripts from anywhere, no network. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/graph.md) |
+| `npx vetobench mcp` | Your MCP permission surface: servers by scope and transport, the allow-rules that let their tools run without asking, and who approved the MCP calls in your transcripts. Never a server or tool name. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/mcp.md) |
+| `vetobench hook install` | Puts the `replay` policy in front of your agent as a Claude Code hook: it asks you before production writes, CI triggers and pushes to main. A dry run unless `--write`; needs `npm install -g vetobench`. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/hook.md) |
+| `npx vetobench scrub` | Finds passwords, keys and tokens left in plain text in your transcripts and replaces only the value with `[redacted:<category>]`. `NAME=value` assignments, which often match ordinary code, only with `--include-assignments`. A dry run unless `--write`; backups first; open sessions are left alone. Rotate the secrets anyway. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/scrub.md) |
+| `npx vetobench check-settings` | For CI: fails when committed settings allow-rules hold a secret, a broad wildcard or a bare `Bash` allow. Also as a GitHub Action in [`action/`](action/README.md). |
+
+A note on Codex CLI: its transcripts record each tool call but not who approved it, so a Codex card would have to guess. [The research note](https://github.com/vetobench/vetobench/blob/main/docs/codex.md) has the details.
 
 ## What you'll see
+
+<img src="assets/readme/demo.svg" width="900" alt="Animated terminal demo with example data: npx vetobench prints who approved the agent's actions, then npx vetobench fix shows what a dry run would remove">
+
+<sub>Example data, not a real setup.</sub>
 
 <details>
 <summary>My card in the terminal, same 30 days</summary>
@@ -73,10 +91,10 @@ Where the agent was running:
 
 ## Is it safe to run?
 
-vetobench reads files on your machine and prints counts. The exceptions: `--svg` writes the image file you name, and `fix --write` edits your own settings files after backing each one up. You can check each part:
+vetobench reads files on your machine and prints counts. The exceptions: `--svg` and `graph --html` write the one file you name, and replace an existing file only with `--force`. `fix --write` and `hook install --write` (or `uninstall --write`) edit your own settings files, and `scrub --write` edits your transcripts; these copy each existing file into a backup folder before they change it. You can check each part:
 
-- **No network code ships.** [`test/no-egress.test.js`](test/no-egress.test.js) fails if anything in `bin/` or `src/` imports a module that can reach the network or start another program (`http`, `https`, `net`, `tls`, `dgram`, `dns`, `child_process` and a few more), loads a module by a computed name, or calls `fetch`, `WebSocket`, `XMLHttpRequest` or `EventSource`.
-- **CI runs every mode with no network.** Each mode of the CLI runs inside a Linux network namespace with no network, on Node 18, 20 and 22. See [`ci.yml`](.github/workflows/ci.yml).
+- **No network code ships.** [`test/no-egress.test.js`](test/no-egress.test.js) fails if anything in `bin/` or `src/` imports a module that can reach the network, start another program or load other code (`http`, `https`, `net`, `tls`, `dgram`, `dns`, `child_process`, `module`, `vm` and a few more, submodules such as `dns/promises` included), uses `createRequire`, loads a module by a computed name, runs code from a string, touches `globalThis`, or mentions `fetch`, `WebSocket`, `XMLHttpRequest` or `EventSource` at all. The test also checks itself against known ways around it.
+- **CI runs every command with no network.** On Node 18, 20 and 22, CI runs these against the synthetic fixtures inside a Linux network namespace with no network: the card (text, `--json`, `--md`, `--share`, `--svg`, `--secrets`), `replay --json`, `drift` (text, `--md`, `--asks --json`), `graph --html`, `doctor --json`, `mcp --json`, `hook run`, `hook install` (refused from a copy that is not a global install; a dry run, `--write` and `uninstall --write` from one that is), `fix` (a dry run and `--write`, in a throwaway home), `scrub` (a dry run, and `--write` on a throwaway copy of the fixtures) and `check-settings`. See [`ci.yml`](.github/workflows/ci.yml).
 - **Zero runtime dependencies, no install scripts.** Nothing else is installed with it and nothing runs at install time. The same test checks `package.json` for both.
 - **Counts only.** The output never contains commands, file paths, prompts, rule bodies or secret values, so a card is safe to paste in public.
 - **Short enough to read.** The whole source is in [`bin/`](bin) and [`src/`](src).
@@ -109,6 +127,13 @@ npx vetobench [transcripts-dir] [options]
 
 npx vetobench replay [transcripts-dir] [--since] [--until] [--policy FILE] [--json]
 npx vetobench fix [transcripts-dir] [--write] [--include-shared] [--keep-wildcards] [--keep-unused] [--since] [--until] [--json]
+npx vetobench doctor [transcripts-dir] [--json] [--ci]
+npx vetobench drift [transcripts-dir] [--weeks N] [--since] [--until] [--asks] [--json | --md]
+npx vetobench graph --html FILE [transcripts-dir] [--since] [--until] [--force]
+npx vetobench mcp [transcripts-dir] [--since] [--until] [--json]
+vetobench hook install|uninstall [--write] [--project] [--policy FILE]
+npx vetobench check-settings [file]... [--json]
+npx vetobench scrub [transcripts-dir] [--write] [--since] [--until] [--json]
 ```
 
 The default directory is `~/.claude/projects`. Each tool call is counted once, even when a resumed session copied it into another transcript. The card also audits your allow-rules: it reads your global settings and those of every project your sessions ran in, and counts the shell rules that never approved a command in the window. Claude Code records a permission decision for each tool call from about v2.1.306 onward.

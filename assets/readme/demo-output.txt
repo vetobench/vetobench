@@ -1,0 +1,59 @@
+Example output: the real CLI run on the synthetic transcripts in test/fixtures/demo/ with the settings in
+test/fixtures/demo-home/. Not anyone's real numbers. Regenerate with: python3 -I assets/readme/make_demo.py svg
+
+$ npx vetobench
+vetobench 0.2.0: who approved your agent's actions
+7 transcripts · 2026-11-03 to 2026-11-17 · 186 of 190 tool calls carry a recorded decision
+
+  Static allow-rule (single command)                        107    57.5%
+  Static allow-rules (compound command)                      11     5.9%
+  AI classifier                                              60    32.3%
+  You, through a permission prompt                            3     1.6%
+  Blocked by the AI classifier                                4     2.2%
+  Rejected or cancelled by you                                1     0.5%
+
+Static rules approved 63.4%, the AI classifier 32.3%, you 3 action(s).
+At least 15 static-approved shell actions relied on a wildcard interpreter or remote rule (git 15).
+
+Where the agent was running:
+  Main sessions (interactive)         76    40.9%   rules 64.5% · classifier 30.3% · you 3
+  Loops (/loop, /goal)                25    13.4%   rules 52.0% · classifier 44.0% · you 0
+  Inside subagents                    85    45.7%   rules 65.9% · classifier 30.6% · you 0
+
+Your allow-rules now: 20 allow in 1 settings file(s) · 2 deny · 3 ask · 2 wildcard interpreter/remote rule(s) · 1 with a secret inline
+5 of 17 shell allow-rules never approved a command in this window.
+
+Run with --secrets to also count passwords, keys and tokens left in your transcripts.
+
+Not counted: approvals you give in chat. Nothing left this machine.
+
+$ npx vetobench fix
+vetobench 0.2.0 fix: what --write would remove from your allow-rules
+History: 7 transcripts · 2026-11-03 to 2026-11-17 (15 day(s))
+Settings files: 1 checked.
+
+  Rules with a secret inside                           1
+  Broad wildcards (python3:*, ssh:*, git:* ...)        2
+  Shell rules that never approved a command            4
+
+Would remove 7 of 20 allow-rules, from 1 file(s).
+Dry run: nothing was changed. Run with --write to apply; each file is backed up first.
+
+Counts only: no rule, path or secret is printed. Nothing left this machine.
+
+$ npx vetobench replay
+vetobench 0.2.0 replay: how often would "ask before production writes" have asked?
+7 transcripts · 2026-11-03 to 2026-11-17 · 122 shell commands
+Policy: built-in (12 categories). Add your own hosts and rules with --policy <file>.
+
+  Push to a main branch                         1     0.8%
+  CI trigger or release                         2     1.6%
+  Package publish                               1     0.8%
+  Write on a remote host over ssh               1     0.8%
+  SQL write to a non-local database             1     0.8%
+  Kubernetes change, non-local context          1     0.8%
+
+Would have asked 7 time(s): 5.7% of 122 shell commands.
+Asks per day: 0.47 on average over 15 day(s), at most 3 on one day; 12 day(s) with none.
+
+Commands are matched in memory and never printed. Nothing left this machine.

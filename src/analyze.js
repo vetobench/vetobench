@@ -1,5 +1,5 @@
 // vetobench analysis: pure, local, zero-network. Reads agent transcripts and returns aggregates only.
-import { createReadStream, readdirSync, statSync, readFileSync, existsSync } from 'node:fs'
+import { createReadStream, lstatSync, readdirSync, realpathSync, statSync, readFileSync, existsSync } from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 
 /**
@@ -49,12 +49,22 @@ export function gateOf(pd, tool) {
   return 'rejected-other'
 }
 
-/** Every *.jsonl under dir (recursively), skipping claude-mem observer sessions. */
+/**
+ * Every *.jsonl under dir (recursively), skipping claude-mem observer sessions. Each directory is walked once, by its
+ * real path: a symlink cycle (projects/p/loop -> projects) cannot loop, and a symlinked folder that aliases another
+ * adds nothing. Symlinked folders are walked last, so a folder reachable without a symlink keeps that path.
+ */
 export function listTranscripts(dir) {
   const out = []
   const stack = [dir]
-  while (stack.length) {
-    const d = stack.pop()
+  const links = []
+  const visited = new Set()
+  while (stack.length || links.length) {
+    const d = stack.length ? stack.pop() : links.pop()
+    let real = d
+    try { real = realpathSync(d) } catch {}
+    if (visited.has(real)) continue
+    visited.add(real)
     let names
     try { names = readdirSync(d) } catch { continue }
     for (const name of names) {
@@ -62,8 +72,12 @@ export function listTranscripts(dir) {
       const p = join(d, name)
       let st
       try { st = statSync(p) } catch { continue }
-      if (st.isDirectory()) stack.push(p)
-      else if (name.endsWith('.jsonl')) out.push(p)
+      if (st.isDirectory()) {
+        let link = false
+        try { link = lstatSync(p).isSymbolicLink() } catch {}
+        if (link) links.push(p)
+        else stack.push(p)
+      } else if (name.endsWith('.jsonl')) out.push(p)
     }
   }
   return out.sort()
@@ -93,7 +107,7 @@ function newTotals() {
   const byShape = Object.fromEntries(SHAPES.map(([k]) => [k, { withDecision: 0, gates: {} }]))
   const shapeFiles = Object.fromEntries(SHAPES.map(([k]) => [k, 0]))
   const totals = { files: 0, unreadable: 0, toolResults: 0, withDecision: 0, repeats: 0, gates: {}, humanByTool: {}, firstTs: null, lastTs: null,
-    versions: {}, byShape, shapeFiles, wildcard: { actions: 0, examined: 0, wordBoundary: 0, byFamily: {} } }
+    versions: {}, byShape, shapeFiles, wildcard: { actions: 0, examined: 0, wordBoundary: 0, byFamily: {} }, byDay: {} }
   return withState(totals)
 }
 
@@ -186,8 +200,11 @@ const textOf = (content) => typeof content === 'string' ? content
  * Scan one transcript file into totals (mutates totals). since/until are 'YYYY-MM-DD' strings (until exclusive).
  * attribute(command, dir) -> { families, wordBoundary } is called for each static-approved Bash command (see
  * attribution.js); dir is the folder the record's session was launched from (sessionDir), or undefined.
+ * onDecision(tool, gate, dir, id), if given, is called once per counted decision with the raw tool name (vetobench mcp)
+ * and the tool_use id; tool is 'unknown' while that call is unseen (it can sit in a later transcript). Name and id must
+ * stay in the caller's memory.
  */
-export async function scanFile(path, totals, { since = null, until = null, attribute = null, root = null } = {}) {
+export async function scanFile(path, totals, { since = null, until = null, attribute = null, root = null, onDecision = null } = {}) {
   const { toolNames, commands, results, decided, cwds, launch, folderLaunch, dirDays, orphans } = withState(totals).state
   // Only path segments below the scanned directory count, so a parent folder named "subagents" changes nothing.
   const below = (root ? relative(root, path) : path).split(sep)
@@ -198,6 +215,7 @@ export async function scanFile(path, totals, { since = null, until = null, attri
     if (decoded) folderLaunch.set(folder, decoded)
   }
   const mainGates = {} // main-thread decisions; their shape (interactive or loop) is known only after the whole file
+  const mainDays = {} // the same, per UTC day
   let ranLoop = false
   totals.files += 1
   try {
@@ -210,6 +228,7 @@ export async function scanFile(path, totals, { since = null, until = null, attri
   const shape = isSubagentFile ? 'graph' : ranLoop ? 'loop' : 'interactive'
   totals.shapeFiles[shape] += 1
   for (const [gate, n] of Object.entries(mainGates)) addShape(totals, shape, gate, n)
+  for (const [day, n] of Object.entries(mainDays)) totals.byDay[day].shapes[shape] += n
   return totals
 
   async function scanLines(path) {
@@ -281,9 +300,19 @@ export async function scanFile(path, totals, { since = null, until = null, attri
         if (o.version) totals.versions[o.version] = (totals.versions[o.version] || 0) + 1
         const tool = toolNames.get(id) || 'unknown'
         const gate = gateOf(pd, tool)
+        if (onDecision) onDecision(tool, gate, dir, id)
         totals.gates[gate] = (totals.gates[gate] || 0) + 1
         if (gate === 'human') totals.humanByTool[toolLabel(tool)] = (totals.humanByTool[toolLabel(tool)] || 0) + 1
-        if (isSubagentFile || o.isSidechain === true) addShape(totals, 'graph', gate)
+        // Per UTC day: decisions, gates and shapes (dates and counts only), for drift and graph.
+        const inGraph = isSubagentFile || o.isSidechain === true
+        if (DAY.test(day)) {
+          const bd = totals.byDay[day] || (totals.byDay[day] = { withDecision: 0, gates: {}, shapes: { interactive: 0, loop: 0, graph: 0 } })
+          bd.withDecision += 1
+          bd.gates[gate] = (bd.gates[gate] || 0) + 1
+          if (inGraph) bd.shapes.graph += 1
+          else mainDays[day] = (mainDays[day] || 0) + 1
+        }
+        if (inGraph) addShape(totals, 'graph', gate)
         else mainGates[gate] = (mainGates[gate] || 0) + 1
         if (attribute && (gate === 'rule' || gate === 'rules-compound') && tool === 'Bash' && command && typeof command === 'string') {
           const w = totals.wildcard
@@ -333,8 +362,9 @@ export const SECRET_PATTERNS = [
   ['slack-token', 'Slack token', atWord(/xox[abprs]-[A-Za-z0-9-]{10,}/)],
   ['stripe-key', 'Stripe secret key', atWord(/[rs]k_(?:live|test)_[A-Za-z0-9]{10,}/)],
   ['jwt', 'JWT', atWord(/eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/)],
+  // The name's parts around the keyword are bounded: unbounded, a long run of name characters made matching quadratic.
   ['assignment', 'Other *_SECRET / *_TOKEN / *_PASSWORD = value',
-    atWord(/[A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_KEY|PRIVATE_KEY|_PK|MNEMONIC)[A-Z0-9_]*\s*=\s*(?:\\?["'])?(?!\/)[A-Za-z0-9+/_-]{12,}/)],
+    atWord(/[A-Z0-9_]{0,64}(?:SECRET|PASSWORD|PASSWD|TOKEN|API_KEY|PRIVATE_KEY|_PK|MNEMONIC)[A-Z0-9_]{0,64}\s*=\s*(?:\\?["'])?(?!\/)[A-Za-z0-9+/_-]{12,}/)],
 ]
 const SECRET = SECRET_PATTERNS.map(([, , rx]) => rx)
 

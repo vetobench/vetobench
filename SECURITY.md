@@ -14,7 +14,7 @@ You will get a reply within 72 hours. The process: I confirm the report, fix it 
 
 ## Report publicly
 
-A guard verdict you think vetobench mis-scored, or a rule it misclassifies, is not a vulnerability. Open a normal issue with a synthetic reproduction (a dedicated "wrong verdict" form arrives with the benchmark). Never paste real transcripts.
+A guard verdict you think vetobench mis-scored, or a rule it misclassifies, is not a vulnerability. Open a [wrong verdict](https://github.com/vetobench/vetobench/issues/new?template=wrong-verdict.yml) issue with a synthetic reproduction. Never paste real transcripts.
 
 ## Releases
 

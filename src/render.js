@@ -47,7 +47,7 @@ export function tally(obj, limit = 6) {
 
 const list = (rows) => rows.map(([k, n]) => `${k} ${num(n)}`).join(' · ')
 const sum = (rows) => rows.reduce((s, [, n]) => s + n, 0)
-const cell = (s) => String(s).replace(/\|/g, '\\|')
+const cell = (s) => String(s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|')
 const row = (cells) => `| ${cells.map(cell).join(' | ')} |`
 
 /**
