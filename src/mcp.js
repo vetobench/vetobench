@@ -3,10 +3,13 @@
 // tools and the project-server approvals in the settings files, and the MCP tool calls in the transcripts with who
 // approved each. Server names, tool names, URLs, commands, env values, headers and paths stay in memory: only counts
 // leave this module. docs/mcp.md lists each source and the documentation it was checked against.
-import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { basename, isAbsolute, join } from 'node:path'
 import { GATES, scanAll } from './analyze.js'
+import { globMatch, managedDir, managedSettingsPaths, parseMcpRule } from './rules.js'
 import { ruleScopes } from './settings.js'
+
+export { managedDir, parseMcpRule }
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/
 export const SCOPES = [
@@ -38,13 +41,6 @@ function readJson(path) {
   } catch { return { bad: true } }
 }
 
-/** The folder of Claude Code's managed-mcp.json and managed-settings.json on this platform. */
-export function managedDir(platform = process.platform) {
-  if (platform === 'darwin') return '/Library/Application Support/ClaudeCode'
-  if (platform === 'win32') return 'C:\\Program Files\\ClaudeCode'
-  return '/etc/claude-code'
-}
-
 /** A server's name as its tool names spell it: each character outside A-Z, a-z, 0-9, _ and - becomes _. */
 export const toolServerName = (name) => String(name).replace(/[^A-Za-z0-9_-]/g, '_')
 
@@ -62,33 +58,6 @@ export function transportOf(def) {
   if (t === 'sse') return 'sse'
   return 'other'
 }
-
-/**
- * One permission rule about MCP tools to { kind, server, tool }, or null when the rule is not about MCP tools.
- * kind: 'server' (every tool of a server: `mcp__s__*`, or the bare `mcp__s`), 'glob' (`mcp__s__get_*`), 'tool'
- * (`mcp__s__t`), or 'inert': a rule that approves nothing as an allow-rule (an unanchored glob such as `mcp__*`, a
- * rule with parentheses, a bare name ending in `_`). Like Claude Code, a rule without the `__*` ending is split at its
- * first `__`, so `mcp__a__b` is tool b of server a.
- */
-export function parseMcpRule(rule) {
-  if (typeof rule !== 'string' || !rule.startsWith('mcp__')) return null
-  const rest = rule.slice(5)
-  const inert = { kind: 'inert' }
-  if (rule.includes('(')) return inert
-  if (rest.endsWith('__*')) {
-    const server = rest.slice(0, -3)
-    return server && !server.includes('*') ? { kind: 'server', server } : inert
-  }
-  const i = rest.indexOf('__')
-  const server = i < 0 ? rest : rest.slice(0, i)
-  if (!server || server.includes('*')) return inert
-  if (i < 0) return server.endsWith('_') ? inert : { kind: 'server', server }
-  const tool = rest.slice(i + 2)
-  if (!tool) return inert
-  return { kind: tool.includes('*') ? 'glob' : 'tool', server, tool }
-}
-
-const globRx = (rule) => new RegExp('^' + rule.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$')
 
 /**
  * The MCP-related entries of settings files, each tagged with where it came from: src 'user' (~/.claude/settings.json),
@@ -137,16 +106,20 @@ function matcher(entries) {
     const p = parseMcpRule(e.rule)
     if (!p) continue
     if (p.kind === 'tool') tools.add(e.rule)
-    else if (p.kind === 'glob') globs.push(globRx(e.rule))
+    else if (p.kind === 'glob') globs.push(e.rule)
     else if (p.kind === 'server') servers.push(`mcp__${p.server}__`)
   }
   return {
-    match: (name) => tools.has(name) ? 'tool' : globs.some((rx) => rx.test(name)) ? 'glob' : servers.some((s) => name.startsWith(s)) ? 'server' : null,
-    /** True when an allow-rule covers every tool of the server whose tool names start with mcp__<norm>__. */
+    // globMatch is linear, so a rule with many `*` cannot stall the scan the way a backtracking regex would.
+    match: (name) => tools.has(name) ? 'tool' : globs.some((g) => globMatch(g, name)) ? 'glob' : servers.some((s) => name.startsWith(s)) ? 'server' : null,
+    /**
+     * True when an allow-rule covers every tool of the server whose tool names start with mcp__<norm>__. parseMcpRule
+     * gives a name with `__` only for the `mcp__<server>__*` form, the one Claude Code documents for such a server.
+     */
     allowsServer: (norm) => entries.some((e) => {
       if (e.type !== 'perm' || e.kind !== 'allow') return false
       const p = parseMcpRule(e.rule)
-      return p && p.kind === 'server' && p.server === norm && (e.rule.endsWith('__*') || !norm.includes('__'))
+      return Boolean(p) && p.kind === 'server' && p.server === norm
     }),
   }
 }
@@ -175,11 +148,7 @@ export async function mcpSurface({ dir, since = null, until = null, home, cwd, m
   const managedEntries = []
   const managedServers = []
   let managedFiles = 0
-  const managedSettings = [join(managed, 'managed-settings.json')]
-  try {
-    for (const f of readdirSync(join(managed, 'managed-settings.d')).sort()) if (f.endsWith('.json')) managedSettings.push(join(managed, 'managed-settings.d', f))
-  } catch { /* no drop-ins */ }
-  for (const p of managedSettings) {
+  for (const p of managedSettingsPaths(managed)) {
     const r = readJson(p)
     if (r.bad) stats.unreadable += 1
     if (!r.value) continue
@@ -202,18 +171,26 @@ export async function mcpSurface({ dir, since = null, until = null, home, cwd, m
     return matchers.get(list)
   }
 
-  // Transcripts: MCP decisions by gate, and which kind of allow-rule a rule-approved call matches today.
+  // Transcripts: MCP decisions by gate, and which kind of allow-rule a rule-approved call matches today. A decision is
+  // kept as { id, tool, gate, dir } and its tool named after the scan: a resumed session can put the decision in an
+  // earlier transcript than its tool call, so at decision time the name may still be unknown.
+  const decisions = []
+  const onDecision = (tool, gate, d, id) => {
+    if (typeof tool === 'string' && tool.startsWith('mcp__')) decisions.push({ id, tool, gate, dir: d })
+    else if (tool === 'unknown' && id) decisions.push({ id, tool: null, gate, dir: d })
+  }
+  const totals = await scanAll(dir, { since, until, onDecision })
   const calls = { withDecision: 0, gates: {}, ruleApproved: { total: 0, tool: 0, glob: 0, server: 0, none: 0 } }
-  const onDecision = (tool, gate, d) => {
-    if (typeof tool !== 'string' || !tool.startsWith('mcp__')) return
+  for (const { id, tool: known, gate, dir: d } of decisions) {
+    const tool = known || totals.state.toolNames.get(id)
+    if (typeof tool !== 'string' || !tool.startsWith('mcp__')) continue
     calls.withDecision += 1
     calls.gates[gate] = (calls.gates[gate] || 0) + 1
-    if (gate !== 'rule') return
+    if (gate !== 'rule') continue
     const how = matcherFor(d).match(tool)
     calls.ruleApproved.total += 1
     calls.ruleApproved[how || 'none'] += 1
   }
-  const totals = await scanAll(dir, { since, until, onDecision })
   const called = new Map() // MCP tool name -> calls in the window (in memory only)
   for (const id of totals.state.results) {
     const name = totals.state.toolNames.get(id)
@@ -347,7 +324,7 @@ export async function mcpSurface({ dir, since = null, until = null, home, cwd, m
     enableAllProjectMcpServers: enableAllOn,
     rules,
     everyToolAllowed,
-    calls: { transcripts: totals.files, firstTs: totals.firstTs, lastTs: totals.lastTs, calls: [...called.values()].reduce((a, b) => a + b, 0),
+    calls: { transcripts: totals.files, unreadable: totals.unreadable, firstTs: totals.firstTs, lastTs: totals.lastTs, calls: [...called.values()].reduce((a, b) => a + b, 0),
       withDecision: calls.withDecision, gates: calls.gates, servers: byOrigin, ruleApproved: calls.ruleApproved },
   }
 }
@@ -435,7 +412,7 @@ export function renderMcp(r, version) {
     (r.rules.denyAllMcp ? ' (a deny-rule covers every MCP tool)' : ''))
   if (allowTotal) {
     const kinds = [['server', 'Every tool of a server (mcp__server__*, mcp__server)'], ['glob', 'Tools by pattern (mcp__server__get_*)'],
-      ['tool', 'Single tools (mcp__server__tool)'], ['inert', 'Approve nothing (mcp__*, parentheses)']].filter(([k]) => k !== 'inert' || a.inert)
+      ['tool', 'Single tools (mcp__server__tool)'], ['inert', 'Approve nothing (mcp__*, parentheses, mcp__server_)']].filter(([k]) => k !== 'inert' || a.inert)
     const kw = Math.max(...kinds.map(([, l]) => l.length))
     for (const [k, label] of kinds) lines.push(`  ${label.padEnd(kw)}  ${num(a[k]).padStart(7)}`)
     if (a.unknownServer) lines.push(`  (${plural(a.unknownServer, 'rule names', 'rules name')} a server that is neither configured nor called in these transcripts.)`)
@@ -466,6 +443,7 @@ export function renderMcp(r, version) {
         `and ${num(ra.tool)} by a single-tool rule${ra.none ? `; ${num(ra.none)} match no rule in your settings files now` : ''}.`)
     }
   }
+  if (c.unreadable) lines.push(`(${plural(c.unreadable, 'transcript')} could not be read and ${c.unreadable === 1 ? 'was' : 'were'} skipped.)`)
   lines.push('')
   lines.push('Counts only: no server or tool name, URL, command, env value or path is printed. Nothing left this machine.')
   return lines.join('\n')

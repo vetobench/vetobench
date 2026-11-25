@@ -1,11 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mcpSurface, parseMcpRule, transportOf, toolServerName, renderMcp } from '../src/mcp.js'
+import { globMatch } from '../src/rules.js'
 
 const BIN = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'vetobench.js')
 const enc = (p) => p.replace(/[^A-Za-z0-9]/g, '-') // how Claude Code names a transcript folder
@@ -107,8 +108,30 @@ test('parseMcpRule follows the documented rule forms', () => {
   // A server named reports__v2: only the wildcard form names it; the bare form is read as server "reports".
   assert.deepEqual(parseMcpRule('mcp__reports__v2__*'), { kind: 'server', server: 'reports__v2' })
   assert.deepEqual(parseMcpRule('mcp__reports__v2'), { kind: 'tool', server: 'reports', tool: 'v2' })
-  for (const r of ['mcp__*', 'mcp__g*__x', 'mcp__gh__get(x)', 'mcp__abc_', 'mcp__']) assert.equal(parseMcpRule(r).kind, 'inert', r)
+  // Any run of stars after the final __ is the wildcard form; a name ending in _ is named by that form only.
+  assert.deepEqual(parseMcpRule('mcp__gh__**'), { kind: 'server', server: 'gh' })
+  assert.deepEqual(parseMcpRule('mcp__abc___*'), { kind: 'server', server: 'abc_' })
+  // A star before the final __ belongs to the tool pattern, after the literal mcp__gh__ prefix.
+  assert.deepEqual(parseMcpRule('mcp__gh__get_*__*'), { kind: 'glob', server: 'gh', tool: 'get_*__*' })
+  for (const r of ['mcp__*', 'mcp__g*__x', 'mcp__g*__*', 'mcp__gh__get(x)', 'mcp__gh__*(x)', 'mcp__abc_', 'mcp__', 'mcp____*', 'mcp__gh__']) {
+    assert.equal(parseMcpRule(r).kind, 'inert', r)
+  }
   for (const r of ['Bash(ls)', 'Read', '*', 42, null]) assert.equal(parseMcpRule(r), null)
+})
+
+test('globMatch: * matches any text, and many stars stay linear', () => {
+  const ref = (g, s) => new RegExp('^' + g.split('*').map((p) => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$').test(s)
+  const cases = [['mcp__a__*', 'mcp__a__x'], ['mcp__a__*', 'mcp__a__'], ['mcp__a__get_*', 'mcp__a__list'], ['*', ''], ['a*b*c', 'abc'],
+    ['a*b*c', 'acb'], ['a**b', 'ab'], ['*ab*ab*', 'abab'], ['*ab*ab*', 'aba'], ['x*', 'y'], ['ab', 'ab'], ['ab', 'abc'], ['a*a', 'a'],
+    ['*a*a*', 'aa'], ['mcp__a__*_read', 'mcp__a__db_read'], ['mcp__a__*_read', 'mcp__a__db_read_x'], ['a.b*', 'aXb'], ['(x)*', '(x)y']]
+  for (const [g, s] of cases) assert.equal(globMatch(g, s), ref(g, s), `${g} ~ ${s}`)
+  // 30 stars against a long name that almost matches: a backtracking regex takes exponential time on this shape.
+  const glob = 'mcp__zzsrv__' + '*a'.repeat(30) + '*b'
+  const name = 'mcp__zzsrv__' + 'a'.repeat(5000)
+  const t0 = Date.now()
+  assert.equal(globMatch(glob, name), false)
+  assert.equal(globMatch(glob, name + 'b'), true)
+  assert.ok(Date.now() - t0 < 50, `took ${Date.now() - t0} ms`)
 })
 
 test('transportOf: no type is stdio, a url without type is skipped (other), streamable-http is http', () => {
@@ -215,6 +238,53 @@ test('mcp: managed-mcp.json, managedMcpServers and managed rules', async () => {
     const text = renderMcp(r, '0.0.0')
     assert.match(text, /A managed-mcp\.json is in place: Claude Code loads only the servers it lists\./)
     assert.match(text, /\(a deny-rule covers every MCP tool\)/)
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true })
+  }
+})
+
+test('mcp: a decision in an earlier transcript than its tool call still counts, by its tool name', async () => {
+  const t = layout()
+  try {
+    // A resumed session: the result with its decision sorts first (a-…), the tool call sits in a later transcript (b-…).
+    const [use, result] = call('mcp__zzsrv-alpha__zztool_two', RULE, t.alpha, '2026-11-10', 'split-id')
+    put(join(t.root, enc(t.alpha), 'a-resumed.jsonl'), jsonl([result]))
+    put(join(t.root, enc(t.alpha), 'b-original.jsonl'), jsonl([use]))
+    const r = await surface(t)
+    assert.equal(r.calls.transcripts, 4)
+    assert.equal(r.calls.calls, 11)
+    assert.equal(r.calls.withDecision, 10)
+    assert.deepEqual(r.calls.gates, { rule: 5, classifier: 3, human: 1, 'human-rejected': 1 })
+    assert.deepEqual(r.calls.ruleApproved, { total: 5, tool: 1, glob: 1, server: 2, none: 1 })
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true })
+  }
+})
+
+test('mcp: a pattern rule with many stars matches fast; unreadable transcripts are counted; hidden managed drop-ins are skipped', async () => {
+  const t = layout()
+  try {
+    const name = 'mcp__zzsrv-beta__' + 'a'.repeat(3000)
+    put(join(t.home, '.claude', 'settings.json'), { permissions: { allow: ['mcp__zzsrv-beta__' + '*a'.repeat(30) + '*b'] } })
+    put(join(t.root, enc(t.alpha), 'long.jsonl'), jsonl([call(name, RULE, t.alpha), call(name + 'b', RULE, t.alpha)]))
+    put(join(t.managed, 'managed-settings.d', '.zz-hidden.json'), '{ broken')
+    const bad = join(t.root, enc(t.alpha), 'zz-locked.jsonl')
+    put(bad, jsonl([call('mcp__zzsrv-alpha__zztool_one', RULE, t.alpha)]))
+    chmodSync(bad, 0o000)
+    const t0 = Date.now()
+    const r = await surface(t)
+    assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`)
+    assert.equal(r.read.unreadable, 0, 'a hidden drop-in is not read')
+    assert.equal(r.read.managedFiles, 0)
+    // The user settings now hold only the many-star pattern: it matches the name ending in b, not the other one.
+    assert.equal(r.calls.ruleApproved.glob, 1)
+    if (!(process.getuid && process.getuid() === 0)) { // root can read anything
+      assert.equal(r.calls.unreadable, 1)
+      const text = renderMcp(r, '0.0.0')
+      assert.match(text, /\(1 transcript could not be read and was skipped\.\)/)
+      assertNoLeak(text, t)
+    }
+    chmodSync(bad, 0o600)
   } finally {
     rmSync(t.dir, { recursive: true, force: true })
   }

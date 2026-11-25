@@ -32,9 +32,36 @@ const cli = (args, cwd) => spawnSync(process.execPath, [BIN, 'check-settings', .
 const noLeaks = (out) => { for (const leak of LEAKS) assert.ok(!out.includes(leak), `leaked: ${leak}`) }
 
 test('isBareBash: only rules that allow every shell command', () => {
-  for (const r of ['Bash', 'Bash()', 'Bash(*)', 'Bash(:*)', 'Bash( * )']) assert.equal(isBareBash(r), true, r)
-  for (const r of ['Bash(git:*)', 'Bash(ls *)', 'Bash(* --version)', 'Read', 'Bash ', 'BashOutput', 'mcp__x__Bash', null, 42]) {
+  // A `*` matches any text, spaces included, so a specifier of stars and whitespace (with or without :*) allows everything.
+  for (const r of ['Bash', 'Bash()', 'Bash(*)', 'Bash(:*)', 'Bash( * )', 'Bash(**)', 'Bash(* *)', 'Bash(*:*)', 'Bash( :* )', 'Bash(\t*\t)']) {
+    assert.equal(isBareBash(r), true, r)
+  }
+  for (const r of ['Bash(git:*)', 'Bash(ls *)', 'Bash(* --version)', 'Bash(*.sh)', 'Bash(: *)', 'Read', 'Bash ', ' Bash', 'Bash*', 'BashOutput',
+    'mcp__x__Bash', null, 42]) {
     assert.equal(isBareBash(r), false, String(r))
+  }
+})
+
+test('check-settings: a rule over 4,096 characters is not run through the patterns, counts as too long, and fails fast', () => {
+  // A long run of SECRET makes the secret patterns backtrack: about 3 s at 192 KB before the cap, growing quadratically.
+  const hostile = `Bash(echo ${'SECRET'.repeat(34000)})`
+  assert.ok(hostile.length > 200000)
+  const atCap = `Bash(${'*'.repeat(4090)})` // exactly 4,096 characters: still checked, and bare Bash
+  assert.equal(atCap.length, 4096)
+  const dir = repo({ '.claude/settings.json': { permissions: { allow: [hostile, atCap, 'Bash(npm test)'] } } })
+  try {
+    const t0 = Date.now()
+    const res = checkSettings([join(dir, '.claude', 'settings.json')])
+    assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`)
+    assert.deepEqual(res.findings, { secret: 0, wildcard: 0, bareBash: 1, tooLong: 1 })
+    assert.equal(res.failing, 2)
+    assert.equal(res.pass, false)
+    const r = cli([], dir)
+    assert.equal(r.status, 1, r.stderr)
+    assert.match(r.stdout, /Rules too long to check \(over 4,096 characters\)\s+1\n/)
+    assert.ok(!r.stdout.includes('SECRET'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -45,7 +72,7 @@ test('check-settings: the default files fail on a secret, a broad wildcard and b
     assert.equal(r.status, 1, r.stderr)
     const j = JSON.parse(r.stdout).checkSettings
     // The $DB_PASSWORD reference is not a secret; Bash(*) is bare Bash, not a broad wildcard.
-    assert.deepEqual(j, { files: { checked: 2, missing: 0, unreadable: 0 }, allow: 7, findings: { secret: 1, wildcard: 1, bareBash: 1 },
+    assert.deepEqual(j, { files: { checked: 2, missing: 0, unreadable: 0 }, allow: 7, findings: { secret: 1, wildcard: 1, bareBash: 1, tooLong: 0 },
       failing: 3, pass: false })
     const text = cli([], dir)
     assert.equal(text.status, 1)
@@ -100,9 +127,9 @@ test('check-settings: named files; a missing or unparseable one fails; comments 
 })
 
 test('check-settings: the committed fixtures that CI and the action job use', () => {
-  assert.deepEqual(checkSettings([join(FIX, 'clean.json')]).findings, { secret: 0, wildcard: 0, bareBash: 0 })
+  assert.deepEqual(checkSettings([join(FIX, 'clean.json')]).findings, { secret: 0, wildcard: 0, bareBash: 0, tooLong: 0 })
   const risky = checkSettings([join(FIX, 'risky.json')])
-  assert.deepEqual(risky.findings, { secret: 1, wildcard: 1, bareBash: 1 })
+  assert.deepEqual(risky.findings, { secret: 1, wildcard: 1, bareBash: 1, tooLong: 0 })
   assert.equal(risky.pass, false)
   assert.equal(cli([join(FIX, 'clean.json')], HERE).status, 0)
   assert.equal(cli([join(FIX, 'risky.json')], HERE).status, 1)
