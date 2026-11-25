@@ -32,29 +32,43 @@ const SHAPE_SHORT = { interactive: 'Main sessions', loop: 'Loops', graph: 'Subag
 // A longer window is drawn in buckets of whole weeks, so a bar never gets thinner than a phone can show.
 export const MAX_BARS = 92
 
+// The chart draws only days from FIRST_DAY (Claude Code was first released in 2025) to today, in UTC. A decision dated
+// outside that range is counted in the header but not drawn, so one forged timestamp cannot stretch the chart into
+// years of empty buckets; the page says how many there were.
+export const FIRST_DAY = '2025-01-01'
+const utcToday = () => iso(Date.now())
+
 /**
- * totals.byDay folded into consecutive buckets from the first to the last day of the window (empty days included).
- * Each bucket: { start, end, days, withDecision, gates: {static, classifier, other, blocked, human}, shapes }.
- * A gate the scanner does not name counts as "other", so every bar adds up to its decisions.
+ * totals.byDay folded into consecutive buckets from the first to the last day with data (empty days in between
+ * included), within FIRST_DAY to `today`. Each bucket: { start, end, days, withDecision, gates: {static, classifier,
+ * other, blocked, human}, shapes }. A gate the scanner does not name counts as "other", so every bar adds up to its
+ * decisions. Decisions not drawn: `undated` (no valid timestamp) and `outside` (a real day outside the range).
  */
-export function graphData(t = {}) {
+export function graphData(t = {}, { today = null } = {}) {
+  const to = isDay(today) ? today : utcToday()
+  const inRange = (k) => k >= FIRST_DAY && k <= to
   const byDay = t.byDay && typeof t.byDay === 'object' ? t.byDay : {}
+  const decided = (d) => Object.values(d && typeof d === 'object' && d.gates && typeof d.gates === 'object' ? d.gates : {})
+    .reduce((s, v) => s + count(v), 0)
   const keys = Object.keys(byDay).filter(isDay).sort()
-  const ends = [t.firstTs, t.lastTs, keys[0], keys[keys.length - 1]].filter(isDay).sort()
+  const shown = keys.filter(inRange)
+  const outside = keys.filter((k) => !inRange(k)).reduce((s, k) => s + decided(byDay[k]), 0)
+  const ends = [t.firstTs, t.lastTs, shown[0], shown[shown.length - 1]].filter((k) => isDay(k) && inRange(k)).sort()
   const total = count(t.withDecision)
-  if (!ends.length) return { buckets: [], size: 1, drawn: 0, undated: total }
+  const range = { from: FIRST_DAY, to }
+  if (!ends.length) return { buckets: [], size: 1, drawn: 0, outside, undated: Math.max(0, total - outside), range }
   const first = ms(ends[0])
-  const last = ms(ends[ends.length - 1])
-  const span = Math.round((last - first) / DAY_MS) + 1
+  const lastMs = ms(ends[ends.length - 1])
+  const span = Math.round((lastMs - first) / DAY_MS) + 1
   const size = span <= MAX_BARS ? 1 : Math.ceil(span / MAX_BARS / 7) * 7
   const buckets = []
-  for (let start = first; start <= last; start += size * DAY_MS) {
-    const end = Math.min(start + (size - 1) * DAY_MS, last)
+  for (let start = first; start <= lastMs; start += size * DAY_MS) {
+    const end = Math.min(start + (size - 1) * DAY_MS, lastMs)
     buckets.push({ start: iso(start), end: iso(end), days: Math.round((end - start) / DAY_MS) + 1, withDecision: 0,
       gates: Object.fromEntries(GATE_SERIES.map(([k]) => [k, 0])), shapes: Object.fromEntries(SHAPES.map(([k]) => [k, 0])) })
   }
   let drawn = 0
-  for (const k of keys) {
+  for (const k of shown) {
     const d = byDay[k]
     if (!d || typeof d !== 'object') continue
     const b = buckets[Math.floor((ms(k) - first) / DAY_MS / size)]
@@ -66,7 +80,19 @@ export function graphData(t = {}) {
     }
     for (const [s] of SHAPES) b.shapes[s] += count(d.shapes && d.shapes[s])
   }
-  return { buckets, size, drawn, undated: Math.max(0, total - drawn) }
+  return { buckets, size, drawn, outside, undated: Math.max(0, total - drawn - outside), range }
+}
+
+const decisions = (n) => `${num(n)} recorded decision${n === 1 ? '' : 's'}`
+
+/** The sentence that says how many decisions are not drawn, and why; '' when every decision is drawn. */
+export function notDrawnText(data) {
+  const parts = [
+    ...(data.undated ? [`${decisions(data.undated)} with no valid timestamp`] : []),
+    ...(data.outside ? [`${decisions(data.outside)} dated before ${data.range.from} or after ${data.range.to} (UTC)`] : []),
+  ]
+  if (!parts.length) return ''
+  return `Not drawn in the charts: ${parts.join(' and ')}. The numbers at the top count ${data.undated + data.outside === 1 ? 'it' : 'them'}.`
 }
 
 /** A y-axis top and step from 1, 2 or 5 times a power of ten, about five gridlines, whole numbers only. */
@@ -187,7 +213,7 @@ function gateSection(data) {
 ${legend(shown.map(([k, name]) => [k, name, num(sum(k))]))}
 ${chart({ label: `Recorded decisions per ${unit} by gate, ${buckets[0].start} to ${buckets[buckets.length - 1].end}`, buckets,
     series: GATE_SERIES, get: (b, k) => b.gates[k], tip, strips })}
-${data.undated ? `<p class="sub">${num(data.undated)} decision(s) carry no valid timestamp and are not drawn.</p>` : ''}
+${notDrawnText(data) ? `<p class="sub">${esc(notDrawnText(data))}</p>` : ''}
 ${table(`The numbers (${num(drawn)} decisions)`, [data.size === 1 ? 'Day' : 'From', 'Decisions', ...shown.map(([, , , name]) => name)],
     buckets.map((b) => [b.start, b.withDecision, ...shown.map(([k]) => b.gates[k])]))}
 </section>`
@@ -334,23 +360,32 @@ const hash = (s) => `'sha256-${createHash('sha256').update(s, 'utf8').digest('ba
 // default-src 'none' refuses every request the page could make; only this exact style and script may run.
 const CSP = `default-src 'none'; style-src ${hash(CSS)}; script-src ${hash(SCRIPT)}; img-src 'none'; base-uri 'none'; form-action 'none'`
 
-/** The report page. Every string in it is a count, a share, a checked date or version, or a label defined here. */
-export function renderHtml(t = {}, { version } = {}) {
+/**
+ * The report page. Every string in it is a count, a share, a checked date or version, or a label defined here.
+ * today (YYYY-MM-DD, default: the current UTC day) ends the range of days the charts may draw.
+ */
+export function renderHtml(t = {}, { version, today = null } = {}) {
   const h = headline(t)
   const range = `${isDay(t.firstTs) ? t.firstTs : '?'} to ${isDay(t.lastTs) ? t.lastTs : '?'}`
   const g = (k) => count(t.gates && t.gates[k])
   const blocked = GATE_SERIES.find(([k]) => k === 'blocked')[2].reduce((s, k) => s + g(k), 0)
   const cc = claudeVersions(t)
   const ver = typeof version === 'string' && /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(version) ? version : '?'
-  const data = graphData(t)
+  const data = graphData(t, { today })
+  const unreadable = count(t.unreadable)
   const notes = [
     ...(blocked ? [`${num(blocked)} blocked (${pct(blocked, h.d)}).`] : []),
     ...(g('answer') ? [`${num(g('answer'))} answers to the agent's own questions are not counted as approvals.`] : []),
     'Approvals given in chat are not counted.',
   ]
-  const body = h.d && data.buckets.length
-    ? [gateSection(data), shapeSection(data), shapeTotals(t)].join('\n')
-    : '<section class="card"><p class="sub">No recorded permission decisions found. Claude Code records them from about v2.1.306 onward.</p></section>'
+  // The header counts every recorded decision; the charts draw the dated ones. When none can be drawn, the page says
+  // so and why, instead of claiming there are no decisions.
+  const body = !h.d
+    ? '<section class="card"><p class="sub">No recorded permission decisions found. Claude Code records them from about v2.1.306 onward.</p></section>'
+    : data.drawn
+      ? [gateSection(data), shapeSection(data), shapeTotals(t)].join('\n')
+      : [`<section class="card">\n<h2>Who approved each action, over time</h2>\n<p class="sub">${esc(notDrawnText(data) ||
+        'None of the recorded decisions can be drawn by day.')}</p>\n</section>`, shapeTotals(t)].join('\n')
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -377,7 +412,8 @@ export function renderHtml(t = {}, { version } = {}) {
 <p class="note">${esc(notes.join(' '))}</p>
 </header>
 ${body}
-<footer><strong>Counts only, made locally.</strong> ${esc(`vetobench ${ver} read the transcripts on this machine and wrote this page. It loads nothing from the network. Days are UTC.`)}</footer>
+<footer><strong>Counts only, made locally.</strong> ${esc(`vetobench ${ver} read the transcripts on this machine and wrote this page.` +
+    `${unreadable ? ` ${num(unreadable)} transcript(s) could not be read and were skipped.` : ''} It loads nothing from the network. Days are UTC.`)}</footer>
 </main>
 <div id="tip" hidden></div>
 <script>${SCRIPT}</script>
@@ -414,7 +450,7 @@ export function parseGraphArgs(argv, defaultDir) {
     else if (a === '--force') o.force = true
     else if (a === '--since' || a === '--until') {
       const v = argv[++i]
-      if (!v || !DAY.test(v)) throw new Error(`${a} needs a date, YYYY-MM-DD`)
+      if (!isDay(v)) throw new Error(`${a} needs a real date, YYYY-MM-DD`)
       o[a.slice(2)] = v
     }
     else if (a === '-h' || a === '--help') o.help = true
@@ -440,8 +476,8 @@ function writeHtml(file, html, force) {
   }
 }
 
-/** `vetobench graph …`: writes the one named file and returns a line for the terminal (counts only, no path). */
-export async function graphCommand(argv, { version, defaultDir }) {
+/** `vetobench graph …`: writes the one named file and returns two lines for the terminal (counts only, no path). */
+export async function graphCommand(argv, { version, defaultDir, now = new Date() }) {
   const o = parseGraphArgs(argv, defaultDir)
   if (o.help) return graphHelp(version)
   let isDir = false
@@ -449,9 +485,14 @@ export async function graphCommand(argv, { version, defaultDir }) {
   if (!isDir) throw new Error(`no transcripts directory at ${o.dir === defaultDir ? '~/.claude/projects' : 'the path given'}`)
   if (!o.force && existsSync(o.html)) throw new Error(HTML_EXISTS) // fail before a long scan
   const t = await scanAll(o.dir, { since: o.since, until: o.until })
-  const data = graphData(t)
-  writeHtml(o.html, renderHtml(t, { version }), o.force)
+  const today = iso(now.getTime())
+  const data = graphData(t, { today })
+  writeHtml(o.html, renderHtml(t, { version, today }), o.force)
   const bars = data.size === 1 ? `${num(data.buckets.length)} day(s)` : `${num(data.buckets.length)} bars of ${data.size} days`
-  return `vetobench ${version} graph: wrote the HTML report (${bars}, ${num(t.withDecision)} recorded decisions).\n` +
+  const extra = [
+    ...(data.undated + data.outside ? [`${num(data.undated + data.outside)} not drawn`] : []),
+    ...(count(t.unreadable) ? [`${num(count(t.unreadable))} transcript(s) could not be read`] : []),
+  ]
+  return `vetobench ${version} graph: wrote the HTML report (${[bars, `${num(t.withDecision)} recorded decisions`, ...extra].join(', ')}).\n` +
     'Open it in a browser: it loads nothing from the network. Look it over before you share it.'
 }

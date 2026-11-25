@@ -30,36 +30,38 @@ npx vetobench drift [transcripts-dir] [--weeks N] [--since YYYY-MM-DD] [--until 
 | `--json` | Counts, shares and changes as JSON |
 | `--md` | The table as markdown, to paste into an issue |
 
-Example, from synthetic transcripts:
+Example, from the synthetic transcripts in `test/fixtures/drift-example/` (made-up numbers). From a clone of the repository:
+
+```sh
+node bin/vetobench.js drift test/fixtures/drift-example --since 2026-10-05 --until 2026-11-04
+```
 
 ```
 vetobench 0.2.0 drift: who approved your agent's actions, week by week
-6 weeks · 2026-10-19 to 2026-11-25 (UTC, weeks start on Monday) · 4,413 recorded decisions · 3 transcripts
+5 weeks · 2026-10-05 to 2026-11-03 (UTC, weeks start on Monday) · 32 recorded decisions · 3 transcripts
 
 Who approved the agent's actions:
   Week of        Decisions   Static rules   AI classifier   You
-  2026-10-19             0   -              -                 0   no recorded decisions
-  2026-10-26           986    73.0%          26.4%            3
-  2026-11-02         1,029    76.8% ▲3.8     22.4% ▼4.0       5
-  2026-11-09         1,017    66.9% ▼9.9     32.4% ▲10.0      2
-  2026-11-16         1,039    61.6% ▼5.3     37.5% ▲5.1       1
-  2026-11-23 *         342    58.5% ▼3.1     40.9% ▲3.4       1
+  2026-10-05             0   -              -                 0   no recorded decisions
+  2026-10-12            10    60.0%          30.0%            1
+  2026-10-19            10    50.0% ▼10.0    40.0% ▲10.0      0
+  2026-10-26             8    37.5% ▼12.5    37.5% ▼2.5       1
+  2026-11-02 *           4    25.0% ▼12.5    50.0% ▲12.5      0
 
 Blocks, and where the agent ran:
   Week of        Blocked: classifier   safety   you   In subagents   In loops
-  2026-10-19                       0        0     0   -              -
-  2026-10-26                       2        0     1    52.7%           6.1%
-  2026-11-02                       3        1     0    46.6% ▼6.1      3.9% ▼2.2
-  2026-11-09                       4        0     1    60.0% ▲13.4     2.0% ▼1.9
-  2026-11-16                       6        2     0    67.4% ▲7.4      0.0% ▼2.0
-  2026-11-23 *                     1        0     0    67.3% ▼0.1      0.0% =
+  2026-10-05                       0        0     0   -              -
+  2026-10-12                       0        0     0    10.0%           0.0%
+  2026-10-19                       1        0     0    20.0% ▲10.0     0.0% =
+  2026-10-26                       0        0     1    25.0% ▲5.0     25.0% ▲25.0
+  2026-11-02 *                     0        1     0     0.0% ▼25.0   100.0% ▲75.0
 
-* partial week: 2026-11-23 to 2026-11-25, 3 of 7 days so far.
+* partial week: 2026-11-02 to 2026-11-03, 2 of 7 days.
 ▲/▼: change in percentage points against the week before.
-No recorded decisions before 2026-10-26 in this window. A week can be empty because its transcripts were deleted (cleanupPeriodDays, 30 days by default), because Claude Code did not record decisions yet (before about v2.1.306), or because the agent did not run.
+No recorded decisions before 2026-10-12 in this window. A week can be empty because its transcripts were deleted (cleanupPeriodDays, 30 days by default), because Claude Code did not record decisions yet (before about v2.1.306), or because the agent did not run.
 
-Human approvals: 1 this week (3 of 7 days so far), 1 last week.
-Static-rule share: 58.5% this week, down 3.1 points on last week (61.6%); 73.0% in the week of 2026-10-26, the earliest shown with decisions.
+Human approvals: 0 in the week of 2026-11-02 (2 of 7 days), 1 the week before.
+Static-rule share: 25.0% in the week of 2026-11-02, down 12.5 points on the week before (37.5%); 60.0% in the week of 2026-10-12, the earliest shown with decisions.
 
 Counts and shares only: they show what moved, not why. Approvals given in chat are not counted. Nothing left this machine.
 ```
@@ -73,6 +75,7 @@ Counts and shares only: they show what moved, not why. Approvals given in chat a
 - **Partial weeks** are weeks the window covers for fewer than 7 days: usually the current week, and a first week that `--since` cuts. The text marks them with `*` and a line that gives their days, the markdown says "partial: n of 7 days", and `--json` sets `partial: true` with `days`.
 - **Empty weeks** have no recorded decisions. Their shares are `-`, and no change is computed against them, so the week after an empty week shows no change either. When empty weeks come before the first recorded decision, a note gives that day, and how many days of its week the data covers.
 - **Changes** are computed from the shares as shown: each share is rounded to 0.1% first, and the change is the difference of the two rounded shares. So every change can be checked against the two numbers it compares.
+- **Rounding** is the card's: 23 of 80 is 28.7% in drift and on the card. A share under 0.1%, which the card prints with three decimals, shows as `<0.1%` and counts as 0 in the changes.
 - **`--asks`** runs `scanReplay` from `src/replay.js` with the built-in policy (the policy of `vetobench replay` without `--policy`) over the same window, and adds up its asks per UTC day of the shell command into the same weeks. It reads the command text in memory, as replay does, and prints only counts.
 - **`--json`** gives, for each week: `week`, `start`, `end`, `from`, `to`, `days`, `partial`, `empty`, `decisions`, the counts `static`, `classifier` and `human`, `blocked` (`classifier`, `safety`, `human`, `other`), `shapes` (`interactive`, `loop`, `graph`), `gates` (the count per gate), `share` and `change` (percent and percentage points, one decimal, `null` when there is nothing to compute), and `asks` with `--asks`. `summary` holds the numbers behind the summary lines, and `window` the dates used, today's UTC date included, so a run can be repeated with `--since` and `--until`.
 
