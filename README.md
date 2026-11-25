@@ -7,13 +7,41 @@
 
 **Who approved your coding agent's actions?**
 
-Coding agents now run hundreds of tool calls an hour. Almost none of them are approved by a person. They are approved by allow-rules you clicked months ago, or by an AI classifier. vetobench shows you the split for your own agent, from transcripts already on your machine. It is also building an open benchmark of how often agent permission guards are wrong on real traffic.
+[![CI](https://github.com/vetobench/vetobench/actions/workflows/ci.yml/badge.svg)](https://github.com/vetobench/vetobench/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/vetobench/vetobench/badge)](https://scorecard.dev/viewer/?uri=github.com/vetobench/vetobench) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-lightgrey)](LICENSE) [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-lightgrey)](#is-it-safe-to-run) [![Network: none](https://img.shields.io/badge/network-none-FF5A1F)](#is-it-safe-to-run)
 
-> Status: pre-release. The CLI below works locally; the npm package and the benchmark are not published yet.
+### In 30 days I approved 12 of my coding agent's 236,734 actions myself.
 
+Static allow-rules and an AI classifier approved almost all the rest. vetobench shows you the same split for your own agent, from the transcripts already on your machine.
+
+<img src="assets/readme/card.svg" width="720" alt="My vetobench card for 2026-10-22 to 2026-11-20: static allow-rules 72.7%, AI classifier 26.7%, human approvals 12, out of 236,734 recorded decisions">
+
+<sub>My own card for those 30 days, drawn by vetobench's <code>--svg</code> option.</sub>
+
+## Run it on your own agent
+
+```sh
+npx github:vetobench/vetobench
 ```
-npx vetobench
-```
+
+You need Node 18 or later. It reads the Claude Code transcripts in `~/.claude/projects` and prints the card in your terminal. Nothing is sent anywhere.
+
+The `vetobench` package on npm is still a placeholder, so for now run it straight from this repository; after the npm release the command will be `npx vetobench`.
+
+## What it finds
+
+- **Who approved each action:** a static allow-rule, the AI classifier (auto mode), or you through a permission prompt. In my 30 days, static allow-rules approved 72.7%, the classifier 26.7%, and I approved 12 actions.
+- **Where the agent was running:** interactive main sessions, loops (`/loop`, `/goal`) and subagents. 69.2% of my agent's actions ran inside subagents and 2.5% in loops, and I approved none of them. All 12 of my approvals came from interactive main sessions.
+- **Wildcard rules doing the work:** how many shell actions went through only because of a broad rule like `git:*` or `python3:*`. For me, more than 29,000 in 30 days (an estimate, and a lower bound).
+- **Allow-rules that never fired:** the shell allow-rules in your global and project settings that never approved a command in the window. Before my cleanup, 88% of mine had not approved a single command in 30 days (an estimate).
+- **Secrets left in plain text:** with `--secrets`, counts of passwords, keys and tokens sitting in your transcripts, by category. No value is ever printed or written.
+- **What a guard policy would have asked:** `replay` runs an "ask before production writes, CI triggers and pushes to main" policy over the shell commands your agent ran, and shows how often it would have asked and how many times a day. My own version of that policy would have asked 15 times in 30 days, over 173,959 shell commands.
+
+Every number above comes from my own transcripts for 2026-10-22 to 2026-11-20 and has a line in [CLAIMS.md](CLAIMS.md) with the exact command behind it. [METHODOLOGY.md](METHODOLOGY.md) defines each term.
+
+## What you'll see
+
+<details>
+<summary>My card in the terminal, same 30 days</summary>
 
 ```
 vetobench 0.0.1: who approved your agent's actions
@@ -33,17 +61,36 @@ Where the agent was running:
   Inside subagents               163,736    69.2%   rules 73.5% · classifier 26.2% · you 0
 ```
 
+</details>
+
+## Is it safe to run?
+
+vetobench reads files on your machine and prints counts. That is all it does, and you can check each part:
+
+- **No network code ships.** [`test/no-egress.test.js`](test/no-egress.test.js) fails if anything in `bin/` or `src/` imports a module that can reach the network or start another program (`http`, `https`, `net`, `tls`, `dgram`, `dns`, `child_process` and a few more), loads a module by a computed name, or calls `fetch`, `WebSocket`, `XMLHttpRequest` or `EventSource`.
+- **CI runs every mode with no network.** Each mode of the CLI runs inside a Linux network namespace with no network, on Node 18, 20 and 22. See [`ci.yml`](.github/workflows/ci.yml).
+- **Zero runtime dependencies, no install scripts.** Nothing else is installed with it and nothing runs at install time. The same test checks `package.json` for both.
+- **Counts only.** The output never contains commands, file paths, prompts, rule bodies or secret values, so a card is safe to paste in public.
+- **Short enough to read.** The whole source is in [`bin/`](bin) and [`src/`](src).
+
+## The benchmark
+
+The card is the first half. The second is an open benchmark of agent permission guards, Claude Code's own classifier among them, measured on real agent traffic labelled by hand. Results come out in January 2027, after each guard's authors have had 14 days to review their numbers and reply.
+
+## Follow along
+
+vetobench is built in public. Progress, new numbers and the benchmark go out on X at [@vetobenchai](https://x.com/vetobenchai).
+
 ## Principles
 
-- **Nothing leaves your machine.** No network code ships, and CI enforces it: a test rejects any network-capable module or API, and the CLI runs in a sandbox with networking off.
-- **Counts only.** The output never contains commands, file paths, prompts, rule bodies or secrets, so a card is safe to paste publicly.
-- **Zero dependencies, no install scripts.** Read the source in `bin/` and `src/` in a few minutes.
-- **Every number is reproducible.** See [METHODOLOGY.md](METHODOLOGY.md) and [CLAIMS.md](CLAIMS.md).
+- **Every number is reproducible.** Each one has a line in [CLAIMS.md](CLAIMS.md): the claim, whether it is measured or estimated, the window, and the command. Definitions and caveats are in [METHODOLOGY.md](METHODOLOGY.md).
+- **Corrections are public.** A wrong number is retracted in the [changelog](CHANGELOG.md) and stays in CLAIMS.md, marked as retracted.
+- **Open source, no paid product.** Apache-2.0.
 
 ## Options
 
 ```
-npx vetobench [transcripts-dir] [options]
+npx github:vetobench/vetobench [transcripts-dir] [options]
 
   --since / --until YYYY-MM-DD   window by UTC day (until is exclusive)
   --rules FILE                   match approvals against this settings file's allow-rules instead of your
@@ -52,7 +99,7 @@ npx vetobench [transcripts-dir] [options]
   --json                         aggregates as JSON (counts only)
   --md / --share / --svg FILE    share formats, see below
 
-npx vetobench replay [transcripts-dir] [--since] [--until] [--policy FILE] [--json]
+npx github:vetobench/vetobench replay [transcripts-dir] [--since] [--until] [--policy FILE] [--json]
 ```
 
 The default directory is `~/.claude/projects`. Each tool call is counted once, even when a resumed session copied it into another transcript. The card also audits your allow-rules: it reads your global settings and those of every project your sessions ran in, and counts the shell rules that never approved a command in the window. Claude Code records a permission decision for each tool call from about v2.1.306 onward.
@@ -60,9 +107,9 @@ The default directory is `~/.claude/projects`. Each tool call is counted once, e
 ## Share your card
 
 ```
-npx vetobench --md               # the card as markdown
-npx vetobench --svg card.svg     # also write a 1200×630 image for posts (--force replaces the file)
-npx vetobench --share            # the markdown, then a link to a prefilled "Submit your card" issue
+npx github:vetobench/vetobench --md               # the card as markdown
+npx github:vetobench/vetobench --svg card.svg     # also write a 1200×630 image for posts (--force replaces the file)
+npx github:vetobench/vetobench --share            # the markdown, then a link to a prefilled "Submit your card" issue
 ```
 
 Every format holds counts, shares, dates and version strings only. vetobench never opens the link and sends nothing: read the card, then open the link yourself. Most social sites want PNG, so open the SVG in a browser and screenshot it, or convert it with any SVG tool.
@@ -70,7 +117,7 @@ Every format holds counts, shares, dates and version strings only. vetobench nev
 ## Replay a guard policy
 
 ```
-npx vetobench replay [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--policy file] [--labels file] [--json]
+npx github:vetobench/vetobench replay [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--policy file] [--labels file] [--json]
 ```
 
 Replays an "ask before production writes, CI triggers and pushes to main" policy against the shell commands your agent actually ran. It prints how often the policy would have asked, per category: pushes to main, CI triggers, remote writes over ssh, SQL writes to non-local databases, Kubernetes, Terraform, cloud changes and more. Put your own hosts, protected branches and extra rules in a JSON file and pass it with `--policy`. It also shows the asks per day, because a prompt you see rarely still gets read. Pass your own verdicts with `--labels` to count right and wrong asks. The format is in [METHODOLOGY.md](METHODOLOGY.md#replay-vetobench-replay). Like the card, it prints counts only, never a command.
