@@ -4,7 +4,7 @@ Notable changes to vetobench, newest first. Versions follow [Semantic Versioning
 
 Corrections to published numbers go here as **retractions**: the claim as published, the corrected number, why it was wrong, and the [CLAIMS.md](CLAIMS.md) line it affects. That line stays in CLAIMS.md, marked retracted, so the record stays complete.
 
-## Unreleased
+## 0.2.0 (2026-11-25)
 
 ### Added
 

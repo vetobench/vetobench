@@ -55,12 +55,16 @@ npx vetobench fix --write   # removes them, after backing each file up
 | `npx vetobench graph --html report.html` | One self-contained HTML page with the card over time: a chart by who approved, a chart by where the agent ran, and the totals. Each bar is a UTC day, or a bucket of whole weeks when the window is longer than 92 days. No scripts from anywhere, no network. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/graph.md) |
 | `npx vetobench mcp` | Your MCP permission surface: servers by scope and transport, the allow-rules that let their tools run without asking, and who approved the MCP calls in your transcripts. Never a server or tool name. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/mcp.md) |
 | `vetobench hook install` | Puts the `replay` policy in front of your agent as a Claude Code hook: it asks you before production writes, CI triggers and pushes to main. A dry run unless `--write`; needs `npm install -g vetobench`. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/hook.md) |
-| `npx vetobench scrub` | Finds passwords, keys and tokens left in plain text in your transcripts and replaces only the value with `[redacted:<category>]`. A dry run unless `--write`; backups first; open sessions are left alone. Rotate the secrets anyway. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/scrub.md) |
+| `npx vetobench scrub` | Finds passwords, keys and tokens left in plain text in your transcripts and replaces only the value with `[redacted:<category>]`. `NAME=value` assignments, which often match ordinary code, only with `--include-assignments`. A dry run unless `--write`; backups first; open sessions are left alone. Rotate the secrets anyway. [Docs](https://github.com/vetobench/vetobench/blob/main/docs/scrub.md) |
 | `npx vetobench check-settings` | For CI: fails when committed settings allow-rules hold a secret, a broad wildcard or a bare `Bash` allow. Also as a GitHub Action in [`action/`](action/README.md). |
 
 A note on Codex CLI: its transcripts record each tool call but not who approved it, so a Codex card would have to guess. [The research note](https://github.com/vetobench/vetobench/blob/main/docs/codex.md) has the details.
 
 ## What you'll see
+
+<img src="assets/readme/demo.svg" width="900" alt="Animated terminal demo with example data: npx vetobench prints who approved the agent's actions, then npx vetobench fix shows what a dry run would remove">
+
+<sub>Example data, not a real setup.</sub>
 
 <details>
 <summary>My card in the terminal, same 30 days</summary>
