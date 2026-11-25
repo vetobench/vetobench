@@ -3,6 +3,7 @@
 // a share, a change in percentage points or a date computed here; never a command, a path, a folder or a tool name.
 import { existsSync, statSync } from 'node:fs'
 import { GATES, scanAll } from './analyze.js'
+import { pct } from './render.js'
 import { scanReplay } from './replay.js'
 
 export const DEFAULT_WEEKS = 8
@@ -66,8 +67,10 @@ export function weekWindow({ since = null, until = null, weeks = null, today }) 
 }
 
 // Shares are kept in tenths of a percent, the precision shown, and each change is the difference of two shown shares:
-// a reader can check every change against the two numbers next to it.
-const tenths = (n, d) => (d ? Math.round((n * 1000) / d) : null)
+// a reader can check every change against the two numbers next to it. The rounding is the card's own (pct in
+// src/render.js), so a week and a card over the same days print the same share. A share under 0.1%, which the card
+// prints with three decimals, is kept as 0 and shown as "<0.1%".
+const tenths = (n, d) => (!d ? null : n / d < 0.001 ? 0 : Math.round(parseFloat(pct(n, d)) * 10))
 const diff = (a, b) => (a === null || b === null ? null : a - b)
 const asPct = (t) => (t === null ? null : t / 10)
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -8,9 +8,11 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scanAll } from '../src/analyze.js'
 import { headline, num, pct } from '../src/render.js'
-import { GATE_SERIES, MAX_BARS, graphData, isDay, niceAxis, parseGraphArgs, renderHtml } from '../src/graph.js'
+import { FIRST_DAY, GATE_SERIES, MAX_BARS, graphCommand, graphData, isDay, niceAxis, parseGraphArgs, renderHtml } from '../src/graph.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+// The last day the charts may draw, for synthetic totals that run past the real date.
+const TODAY = '2027-06-30'
 const FIXTURES = join(ROOT, 'test', 'fixtures', 'projects')
 const SHAPE_FIXTURES = join(ROOT, 'test', 'fixtures', 'shapes')
 const BIN = join(ROOT, 'bin', 'vetobench.js')
@@ -71,7 +73,7 @@ test('graphData: one bucket per day of the window, empty days included, adding u
 
 test('graphData: a long window is drawn in whole-week buckets that still add up', () => {
   const t = longTotals(200)
-  const d = graphData(t)
+  const d = graphData(t, { today: TODAY })
   assert.equal(d.size, 7)
   assert.ok(d.buckets.length <= MAX_BARS)
   assert.equal(d.buckets.length, Math.ceil(200 / 7))
@@ -81,9 +83,59 @@ test('graphData: a long window is drawn in whole-week buckets that still add up'
   assert.equal(sumBy(d.buckets, (b) => b.days), 200)
   assert.equal(sumBy(d.buckets, (b) => b.withDecision), t.withDecision)
   assert.equal(sumBy(d.buckets, (b) => b.shapes.graph), t.byShape.graph.withDecision)
-  assert.equal(graphData(longTotals(MAX_BARS)).size, 1)
-  // A far-off bogus date stretches the window but never past MAX_BARS bars.
-  assert.ok(graphData({ ...longTotals(3), firstTs: '1970-01-01' }).buckets.length <= MAX_BARS)
+  assert.equal(graphData(longTotals(MAX_BARS), { today: TODAY }).size, 1)
+})
+
+test('graphData: a forged date far in the past or future is not drawn and is reported, so the chart keeps daily bars', () => {
+  // A tool call (no decision) dated 1970 and decisions dated 1970 and 2099 around ten real days.
+  const t = { ...longTotals(10), firstTs: '1970-01-01', lastTs: '2099-01-01' }
+  t.byDay = { ...t.byDay, '1970-01-01': { withDecision: 1, gates: { rule: 1 }, shapes: { interactive: 1 } },
+    '2099-01-01': { withDecision: 3, gates: { classifier: 3 }, shapes: { graph: 3 } } }
+  const real = t.withDecision
+  t.withDecision += 4
+  t.gates = { ...t.gates, rule: t.gates.rule + 1, classifier: t.gates.classifier + 3 }
+  const d = graphData(t, { today: '2026-11-25' })
+  assert.equal(d.size, 1)
+  assert.deepEqual([d.buckets[0].start, d.buckets.at(-1).end, d.buckets.length], ['2026-06-01', '2026-06-10', 10])
+  assert.deepEqual([d.drawn, d.outside, d.undated], [real, 4, 0])
+  assert.deepEqual(d.range, { from: FIRST_DAY, to: '2026-11-25' })
+
+  const html = renderHtml(t, { version: '9.9.9', today: '2026-11-25' })
+  assert.ok(html.includes('Not drawn in the charts: 4 recorded decisions dated before 2025-01-01 or after 2026-11-25 (UTC). The numbers at the top count them.'))
+  assert.ok(html.includes(`${num(t.withDecision)} of ${num(t.toolResults)} tool calls carry a recorded decision`), 'the header counts all of them')
+  const [gates] = tables(html)
+  assert.equal(gates.rows.length, 10)
+  assert.equal(gates.foot[1], real)
+  assert.ok(html.includes('>1970-01-01 to 2099-01-01<'), "the header's range is the card's: first to last tool call")
+  assert.ok(html.includes('by gate, 2026-06-01 to 2026-06-10'), "the chart's range is the days it draws")
+
+  // Today itself is drawn; tomorrow is not.
+  const edge = longTotals(2)
+  edge.byDay['2026-06-03'] = { withDecision: 1, gates: { rule: 1 }, shapes: { interactive: 1 } }
+  edge.withDecision += 1
+  assert.deepEqual([graphData(edge, { today: '2026-06-03' }).outside, graphData(edge, { today: '2026-06-02' }).outside], [0, 1])
+})
+
+test('decisions with no valid timestamp: the header counts them and the body says they are not drawn', () => {
+  const t = { files: 1, toolResults: 2, withDecision: 2, gates: { rule: 2 }, byShape: { interactive: { withDecision: 2, gates: { rule: 2 } } },
+    shapeFiles: { interactive: 1 }, byDay: {} }
+  const html = renderHtml(t, { version: '9.9.9' })
+  assert.ok(html.includes('<span class="v">100.0%</span>'))
+  assert.ok(html.includes('2 of 2 tool calls carry a recorded decision'))
+  assert.ok(!html.includes('No recorded permission decisions found'))
+  assert.ok(html.includes('Not drawn in the charts: 2 recorded decisions with no valid timestamp. The numbers at the top count them.'))
+  assert.ok(!html.includes('<table>'), 'no daily table without a day to draw')
+  assert.ok(html.includes('Totals by where the agent ran'))
+  // Some dated, some not: the charts are drawn and the note gives the rest.
+  const mixed = { ...longTotals(3) }
+  mixed.withDecision += 1
+  assert.ok(renderHtml(mixed, { version: '9.9.9' }).includes('Not drawn in the charts: 1 recorded decision with no valid timestamp. The numbers at the top count it.'))
+})
+
+test('the footer says how many transcripts could not be read', () => {
+  assert.ok(renderHtml({ ...longTotals(3), unreadable: 2 }, { version: '9.9.9' })
+    .includes('vetobench 9.9.9 read the transcripts on this machine and wrote this page. 2 transcript(s) could not be read and were skipped.'))
+  assert.ok(!renderHtml(longTotals(3), { version: '9.9.9' }).includes('could not be read'))
 })
 
 test('niceAxis: whole-number steps of 1, 2 or 5 times a power of ten', () => {
@@ -170,6 +222,11 @@ test('parseGraphArgs: --html is required and a flag is never taken as its file',
   assert.throws(() => parseGraphArgs(['--html'], 'D'), /--html needs an output file/)
   assert.throws(() => parseGraphArgs(['--html', '--force'], 'D'), /--html needs an output file/)
   assert.throws(() => parseGraphArgs(['--html', 'r.html', '--since', 'yesterday'], 'D'), /YYYY-MM-DD/)
+  for (const bad of ['2026-13-45', '2026-02-30', '2026-00-10', '2026-1-1']) {
+    assert.throws(() => parseGraphArgs(['--html', 'r.html', '--since', bad], 'D'), /--since needs a real date, YYYY-MM-DD/, bad)
+    assert.throws(() => parseGraphArgs(['--html', 'r.html', '--until', bad], 'D'), /--until needs a real date, YYYY-MM-DD/, bad)
+  }
+  assert.equal(parseGraphArgs(['--html', 'r.html', '--until', '2028-02-29'], 'D').until, '2028-02-29')
   assert.throws(() => parseGraphArgs(['--html', 'r.html', 'a', 'b'], 'D'), /one transcripts directory/)
   assert.equal(parseGraphArgs(['--help'], 'D').help, true)
 })
@@ -258,6 +315,39 @@ test('CLI: commands, folder names and secrets in the transcripts never reach the
     assert.deepEqual(gates.foot, ['Total', 3, 1, 0, 1, 1])
     assert.deepEqual(gates.head, ['Day', 'Decisions', 'Static rules', 'AI classifier', 'Blocked', 'You'])
     assert.deepEqual(shapes.foot, ['Total', 3, 2, 0, 1])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CLI: decisions without a timestamp and unreadable transcripts are counted, on the page and in the terminal', async () => {
+  const { dir, cwd } = sandbox()
+  try {
+    const projects = join(dir, 'projects', 'p')
+    mkdirSync(projects, { recursive: true })
+    writeFileSync(join(projects, 'undated.jsonl'), [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'u1', name: 'Bash' }] } }),
+      JSON.stringify({ type: 'user', permissionDecision: { decision: 'accept', source: 'config', reasonType: 'rule' },
+        message: { content: [{ type: 'tool_result', tool_use_id: 'u1', content: 'ok' }] } }),
+    ].join('\n') + '\n')
+    const html = join(cwd, 'r.html')
+    const out = await graphCommand(['--html', html, join(dir, 'projects')], { version: '9.9.9', defaultDir: 'unused' })
+    assert.equal(out.split('\n')[0], 'vetobench 9.9.9 graph: wrote the HTML report (0 day(s), 1 recorded decisions, 1 not drawn).')
+    const page = readFileSync(html, 'utf8')
+    assert.ok(page.includes('<span class="v">100.0%</span>'))
+    assert.ok(page.includes('Not drawn in the charts: 1 recorded decision with no valid timestamp.'))
+    assert.ok(!page.includes('No recorded permission decisions found'))
+
+    // A transcript that cannot be opened (permissions; not testable as root or on Windows) is reported as a count.
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      const locked = join(projects, 'locked.jsonl')
+      writeFileSync(locked, '{}\n')
+      chmodSync(locked, 0o000)
+      const again = await graphCommand(['--html', html, '--force', join(dir, 'projects')], { version: '9.9.9', defaultDir: 'unused' })
+      chmodSync(locked, 0o600)
+      assert.match(again, /, 1 transcript\(s\) could not be read\)\./)
+      assert.ok(readFileSync(html, 'utf8').includes('1 transcript(s) could not be read and were skipped.'))
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

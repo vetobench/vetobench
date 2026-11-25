@@ -22,7 +22,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Tests (includes the static no-network check)
         run: node --test
-      - name: Run every CLI mode with networking switched off
+      - name: Run every CLI command with networking switched off
         run: |
           set -e
           offline() { unshare --user --net "$@"; }
@@ -34,13 +34,50 @@ jobs:
           offline node bin/vetobench.js graph --html "$RUNNER_TEMP/report.html" test/fixtures/shapes
           offline node bin/vetobench.js test/fixtures/secrets --secrets
           offline node bin/vetobench.js replay test/fixtures/replay --json
-          offline node bin/vetobench.js drift test/fixtures/shapes --asks --json
+          # drift: fixed windows around the fixtures' dates, so the runs cover their data on any later day
+          offline node bin/vetobench.js drift test/fixtures/drift-example --since 2026-10-05 --until 2026-11-04
+          offline node bin/vetobench.js drift test/fixtures/shapes --since 2026-11-09 --until 2026-11-16 --md
+          out=$(offline node bin/vetobench.js drift test/fixtures/shapes --since 2026-11-09 --until 2026-11-16 --asks --json)
+          printf '%s' "$out" | grep -q '"firstDecision": "2026-11-10"'
           offline node bin/vetobench.js scrub test/fixtures/secrets --json
           offline env HOME="$RUNNER_TEMP" node bin/vetobench.js doctor test/fixtures/projects --json
           offline env HOME="$RUNNER_TEMP" node bin/vetobench.js mcp test/fixtures/projects --json
-          # hook run: must answer "ask" for a push to main, and stay silent for a harmless command
-          printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | offline node bin/vetobench.js hook run | grep -q '"ask"'
-          test -z "$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | offline node bin/vetobench.js hook run)"
+          # hook run: must answer "ask" for a push to main, and print nothing for a harmless command. Each output is
+          # captured first, so a crash (a non-zero exit) fails the step instead of looking like silence.
+          out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | offline node bin/vetobench.js hook run)
+          printf '%s' "$out" | grep -q '"ask"'
+          out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | offline node bin/vetobench.js hook run)
+          test -z "$out"
+          # hook install from this checkout, which is not a global install: it must refuse with exit code 1, say why,
+          # and write nothing
+          mkdir -p "$RUNNER_TEMP/hk/.claude"
+          status=0
+          out=$(offline env HOME="$RUNNER_TEMP/hk" node bin/vetobench.js hook install) || status=$?
+          test "$status" -eq 1
+          printf '%s\n' "$out" | grep -qF 'The hook needs a lasting install, and this copy of vetobench is not the global one.'
+          test ! -e "$RUNNER_TEMP/hk/.claude/settings.json"
+          # hook install with this checkout as the global install (an npm prefix whose lib/node_modules/vetobench
+          # links here, as npm link does): a dry run that writes nothing, then --write, then uninstall --write
+          mkdir -p "$RUNNER_TEMP/prefix/lib/node_modules"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/prefix/lib/node_modules/vetobench"
+          out=$(offline env HOME="$RUNNER_TEMP/hk" npm_config_prefix="$RUNNER_TEMP/prefix" node bin/vetobench.js hook install)
+          printf '%s\n' "$out" | grep -qF 'Dry run: nothing was changed.'
+          test ! -e "$RUNNER_TEMP/hk/.claude/settings.json"
+          offline env HOME="$RUNNER_TEMP/hk" npm_config_prefix="$RUNNER_TEMP/prefix" node bin/vetobench.js hook install --write
+          grep -q 'hook run' "$RUNNER_TEMP/hk/.claude/settings.json"
+          offline env HOME="$RUNNER_TEMP/hk" node bin/vetobench.js hook uninstall --write
+          if grep -q 'hook run' "$RUNNER_TEMP/hk/.claude/settings.json"; then
+            echo "::error::hook uninstall left the hook in place"
+            exit 1
+          fi
+          # scrub --write on a throwaway copy of the secrets fixtures, aged past the open-session guard, with a
+          # throwaway home for the backups; the committed fixtures must stay as they are
+          cp -R test/fixtures/secrets "$RUNNER_TEMP/scrub"
+          find "$RUNNER_TEMP/scrub" -type f -exec touch -t 202611010000 {} +
+          offline env HOME="$RUNNER_TEMP/h" node bin/vetobench.js scrub "$RUNNER_TEMP/scrub" --write
+          grep -rqF '[redacted:' "$RUNNER_TEMP/scrub"
+          test -n "$(ls -A "$RUNNER_TEMP/h/.claude/vetobench-backups")"
+          git diff --exit-code -- test/fixtures/secrets
           # fix: a dry run, then --write, against a throwaway home with synthetic settings
           mkdir -p "$RUNNER_TEMP/h/.claude"
           printf '{"permissions":{"allow":["Bash(python3:*)","Bash(git status)"]}}\n' > "$RUNNER_TEMP/h/.claude/settings.json"

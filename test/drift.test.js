@@ -1,13 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isoWeek, mondayOf, isDay, weekWindow, scanDrift, driftCommand, parseDriftArgs } from '../src/drift.js'
+import { isoWeek, mondayOf, isDay, weekWindow, weeklyRows, summarize, scanDrift, driftCommand, parseDriftArgs, renderDrift } from '../src/drift.js'
+import { pct } from '../src/render.js'
 
-const BIN = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'vetobench.js')
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const BIN = join(ROOT, 'bin', 'vetobench.js')
 // A Wednesday: the current week (Monday 2026-11-23) is partial, 3 of 7 days.
 const NOW = new Date('2026-11-25T12:00:00Z')
 
@@ -162,6 +164,46 @@ test('one scan groups decisions into weeks: shares, blocks, shapes and changes i
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('shares are rounded as on the card: 23 of 80 is 28.7% in drift and on the card', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vetobench-drift-'))
+  const home = mkdtempSync(join(tmpdir(), 'vetobench-home-'))
+  try {
+    const records = []
+    for (let i = 0; i < 80; i++) records.push(...call(`2026-11-1${i % 5}T09:${String(i % 60).padStart(2, '0')}:00Z`, i < 23 ? RULE : CLASSIFIER))
+    writeJsonl(dir, 'p/s.jsonl', records)
+    const window = ['--since', '2026-11-09', '--until', '2026-11-16']
+    const j = JSON.parse(await run(dir, [...window, '--json']))
+    assert.deepEqual(j.drift.weeks.map((w) => [w.decisions, w.share.static, w.share.classifier]), [[80, 28.7, 71.3]])
+    assert.match(await run(dir, window), /^ {2}2026-11-09 +80 +28\.7% +71\.3% /m)
+    // The card over the same days prints the same shares.
+    assert.equal(pct(23, 80), '28.7%')
+    const card = spawnSync(process.execPath, [BIN, dir, ...window], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' })
+    assert.equal(card.status, 0, card.stderr)
+    assert.match(card.stdout, /^Static rules approved 28\.7%, the AI classifier 71\.3%/m)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a share under 0.1% (three decimals on the card) is shown as <0.1% and counts as 0 in the changes', () => {
+  const win = weekWindow({ since: '2026-11-02', until: '2026-11-16', today: '2026-11-25' })
+  const byDay = {
+    '2026-11-03': { withDecision: 1500, gates: { rule: 1, classifier: 1499 }, shapes: { interactive: 1500, loop: 0, graph: 0 } },
+    '2026-11-10': { withDecision: 1000, gates: { rule: 1, classifier: 999 }, shapes: { interactive: 1000, loop: 0, graph: 0 } },
+  }
+  const rows = weeklyRows(win, byDay)
+  const [a, b] = rows
+  assert.equal(pct(1, 1500), '0.067%')
+  assert.deepEqual([a.share.static, a.share.classifier], [0, 999])
+  assert.deepEqual([b.share.static, b.share.classifier], [1, 999]) // 0.1% exactly: one decimal on the card too
+  assert.deepEqual([b.change.static, b.change.classifier], [1, 0])
+  const text = renderDrift({ files: 1, unreadable: 0, today: '2026-11-25', firstDay: win.firstDay, lastDay: win.lastDay, current: false,
+    decisions: 2500, firstDecision: '2026-11-03', rows, summary: summarize(rows, { current: false }) }, { version: 'test' })
+  assert.match(text, /^ {2}2026-11-02 +1,500 +<0\.1% +99\.9% /m)
+  assert.match(text, /^ {2}2026-11-09 +1,000 +0\.1% ▲0\.1 +99\.9% = /m)
 })
 
 test('the text table marks the partial week and empty weeks and states the summary from the numbers', async () => {
@@ -328,6 +370,26 @@ test('the CLI runs drift: help, a fixed past window as JSON, and errors with exi
     assert.match(main.stdout, /^ {2}drift {13}/m)
   } finally {
     rmSync(dir, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// The example in docs/drift.md is the output of the command shown above it, run from the repository root on the
+// committed synthetic fixture. A change to drift's output, or a new version number in its first line, needs a new paste.
+test('the example in docs/drift.md is byte for byte the output of the command shown above it', () => {
+  const doc = readFileSync(join(ROOT, 'docs', 'drift.md'), 'utf8')
+  const blocks = [...doc.matchAll(/^```sh\nnode bin\/vetobench\.js (drift [^\n]+)\n```\n\n```\n([\s\S]*?)\n```$/gm)]
+  assert.equal(blocks.length, 1, 'one example: a sh block with the command, then a block with its output')
+  const [, command, shown] = blocks[0]
+  const args = command.split(' ')
+  assert.equal(args[1], 'test/fixtures/drift-example', 'the example reads the committed synthetic fixture')
+  assert.ok(args.includes('--since') && args.includes('--until'), 'a fixed window, so the output does not depend on today')
+  const home = mkdtempSync(join(tmpdir(), 'vetobench-home-'))
+  try {
+    const r = spawnSync(process.execPath, [BIN, ...args], { cwd: ROOT, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' })
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(r.stdout, `${shown}\n`, `docs/drift.md is out of date: paste the output of \`node bin/vetobench.js ${command}\``)
+  } finally {
     rmSync(home, { recursive: true, force: true })
   }
 })

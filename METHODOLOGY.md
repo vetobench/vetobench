@@ -98,16 +98,16 @@ The rules line ("Your allow-rules now") and wildcard attribution read your curre
 
 ## Other commands
 
-Each of these follows the same rules as the card: it reads local files, sends nothing, and prints counts only. Their methods, sources and limits are in their own documents.
+Each of these follows the same rules as the card: it reads local files, sends nothing, and prints counts only. Their methods, sources and limits are in their own documents, in the repository (they are not part of the npm package).
 
-- **`doctor`** ([docs/doctor.md](docs/doctor.md)): eleven fixed checks on the settings files of [Settings files](#settings-files); every settings key it reads is checked against Claude Code's documentation, cited there. The checks are heuristics: they say where to look, not whether a setup is safe.
-- **`drift`** ([docs/drift.md](docs/drift.md)): the card's gates and shapes per ISO week (Monday start, UTC), from one scan; changes are the difference between the two shares as printed.
-- **`graph`** ([docs/graph.md](docs/graph.md)): the card's totals per UTC day, as one self-contained HTML file.
-- **`mcp`** ([docs/mcp.md](docs/mcp.md)): MCP servers from the configuration files Claude Code documents, MCP allow, deny and ask rules, and MCP tool calls by gate.
-- **`hook`** ([docs/hook.md](docs/hook.md)): the `replay` policy run live as a `PreToolUse` hook; it fails open (an error never blocks the agent).
-- **`scrub`** ([docs/scrub.md](docs/scrub.md)): the `SECRET_PATTERNS` of [Secrets left in transcripts](#secrets-left-in-transcripts---secrets), minus `$VARIABLE` references; only the value is replaced, each changed line is parsed again, and files written in the last 10 minutes are left alone. A session whose earlier messages were redacted may not resume on newer models.
-- **`check-settings`** ([action/README.md](action/README.md)): the secret and wildcard checks of `fix`, for committed settings in CI.
-- **Codex CLI** ([docs/codex.md](docs/codex.md)): not supported; its transcripts do not record who approved each tool call.
+- **`doctor`** ([docs/doctor.md](https://github.com/vetobench/vetobench/blob/main/docs/doctor.md)): eleven fixed checks on the settings files of [Settings files](#settings-files); every settings key it reads is checked against Claude Code's documentation, cited there. The checks are heuristics: they say where to look, not whether a setup is safe.
+- **`drift`** ([docs/drift.md](https://github.com/vetobench/vetobench/blob/main/docs/drift.md)): the card's gates and shapes per ISO week (Monday start, UTC), from one scan; shares are rounded as on the card, and changes are the difference between the two shares as printed.
+- **`graph`** ([docs/graph.md](https://github.com/vetobench/vetobench/blob/main/docs/graph.md)): the card's totals per UTC day (per bucket of whole weeks past 92 days), as one self-contained HTML file. Decisions with no valid timestamp, or dated before 2025 or after the day the page is made, are counted at the top but not drawn, and the page says how many.
+- **`mcp`** ([docs/mcp.md](https://github.com/vetobench/vetobench/blob/main/docs/mcp.md)): MCP servers from the configuration files Claude Code documents, MCP allow, deny and ask rules, and MCP tool calls by gate.
+- **`hook`** ([docs/hook.md](https://github.com/vetobench/vetobench/blob/main/docs/hook.md)): the `replay` policy run live as a `PreToolUse` hook; it fails open (an error never blocks the agent).
+- **`scrub`** ([docs/scrub.md](https://github.com/vetobench/vetobench/blob/main/docs/scrub.md)): the `SECRET_PATTERNS` of [Secrets left in transcripts](#secrets-left-in-transcripts---secrets), minus `$VARIABLE` references; only the value is replaced, each changed line is parsed again, and files written in the last 10 minutes are left alone. A session whose earlier messages were redacted may not resume on newer models.
+- **`check-settings`** ([action/README.md](https://github.com/vetobench/vetobench/blob/main/action/README.md)): the secret and broad-wildcard checks of `fix`, plus a bare `Bash` allow (`Bash`, `Bash()`, `Bash(*)` or `Bash(:*)`, which approves every shell command), for committed settings in CI.
+- **Codex CLI** ([docs/codex.md](https://github.com/vetobench/vetobench/blob/main/docs/codex.md)): not supported; its transcripts do not record who approved each tool call.
 
 ## Known limits
 

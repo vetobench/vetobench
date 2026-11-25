@@ -16,7 +16,11 @@ Corrections to published numbers go here as **retractions**: the claim as publis
 - `vetobench scrub`: redacts secret values left in plain text in your transcripts, value by value. A dry run unless `--write`; backups first; open sessions are left alone.
 - `vetobench check-settings` and a GitHub Action (`action/`) that fails CI on committed allow-rules with a secret, a broad wildcard or a bare `Bash` allow.
 - Issue forms (wrong verdict, bug, feature idea), a pull request template, `docs/releasing.md`, and a research note on Codex CLI approvals (`docs/codex.md`).
-- CI runs every new command with networking switched off.
+- CI runs each new command with networking switched off: `doctor --json`, `drift` (text, `--md`, `--asks --json`, in fixed windows around the fixtures' dates), `graph --html`, `mcp --json`, `hook run`, `hook install` (the refusal from a copy that is not a global install, then a dry run, `--write` and `uninstall --write` from one that is), `scrub` (a dry run, and `--write` on a throwaway copy of the fixtures) and `check-settings`.
+
+### Changed
+
+- The static no-network test (`test/no-egress.test.js`) also rejects submodules of the forbidden modules (`dns/promises`), the `module` and `vm` modules, `createRequire`, a dynamic `import()` or `require()` of anything but one plain string, code run from a string, `globalThis`, and any mention of `fetch`, called or not. It checks itself against those evasions.
 
 ## 0.1.0 (2026-11-25)
 
