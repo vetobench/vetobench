@@ -1,5 +1,5 @@
 // vetobench analysis: pure, local, zero-network. Reads agent transcripts and returns aggregates only.
-import { createReadStream, readdirSync, statSync, readFileSync, existsSync } from 'node:fs'
+import { createReadStream, lstatSync, readdirSync, realpathSync, statSync, readFileSync, existsSync } from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 
 /**
@@ -49,12 +49,22 @@ export function gateOf(pd, tool) {
   return 'rejected-other'
 }
 
-/** Every *.jsonl under dir (recursively), skipping claude-mem observer sessions. */
+/**
+ * Every *.jsonl under dir (recursively), skipping claude-mem observer sessions. Each directory is walked once, by its
+ * real path: a symlink cycle (projects/p/loop -> projects) cannot loop, and a symlinked folder that aliases another
+ * adds nothing. Symlinked folders are walked last, so a folder reachable without a symlink keeps that path.
+ */
 export function listTranscripts(dir) {
   const out = []
   const stack = [dir]
-  while (stack.length) {
-    const d = stack.pop()
+  const links = []
+  const visited = new Set()
+  while (stack.length || links.length) {
+    const d = stack.length ? stack.pop() : links.pop()
+    let real = d
+    try { real = realpathSync(d) } catch {}
+    if (visited.has(real)) continue
+    visited.add(real)
     let names
     try { names = readdirSync(d) } catch { continue }
     for (const name of names) {
@@ -62,8 +72,12 @@ export function listTranscripts(dir) {
       const p = join(d, name)
       let st
       try { st = statSync(p) } catch { continue }
-      if (st.isDirectory()) stack.push(p)
-      else if (name.endsWith('.jsonl')) out.push(p)
+      if (st.isDirectory()) {
+        let link = false
+        try { link = lstatSync(p).isSymbolicLink() } catch {}
+        if (link) links.push(p)
+        else stack.push(p)
+      } else if (name.endsWith('.jsonl')) out.push(p)
     }
   }
   return out.sort()
@@ -347,8 +361,9 @@ export const SECRET_PATTERNS = [
   ['slack-token', 'Slack token', atWord(/xox[abprs]-[A-Za-z0-9-]{10,}/)],
   ['stripe-key', 'Stripe secret key', atWord(/[rs]k_(?:live|test)_[A-Za-z0-9]{10,}/)],
   ['jwt', 'JWT', atWord(/eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/)],
+  // The name's parts around the keyword are bounded: unbounded, a long run of name characters made matching quadratic.
   ['assignment', 'Other *_SECRET / *_TOKEN / *_PASSWORD = value',
-    atWord(/[A-Z0-9_]*(?:SECRET|PASSWORD|PASSWD|TOKEN|API_KEY|PRIVATE_KEY|_PK|MNEMONIC)[A-Z0-9_]*\s*=\s*(?:\\?["'])?(?!\/)[A-Za-z0-9+/_-]{12,}/)],
+    atWord(/[A-Z0-9_]{0,64}(?:SECRET|PASSWORD|PASSWD|TOKEN|API_KEY|PRIVATE_KEY|_PK|MNEMONIC)[A-Z0-9_]{0,64}\s*=\s*(?:\\?["'])?(?!\/)[A-Za-z0-9+/_-]{12,}/)],
 ]
 const SECRET = SECRET_PATTERNS.map(([, , rx]) => rx)
 

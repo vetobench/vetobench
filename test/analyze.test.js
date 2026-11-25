@@ -205,3 +205,35 @@ test('byDay splits decisions, gates and shapes per UTC day, and adds up to the t
   for (const k of Object.keys(t.byDay)) assert.match(k, /^\d{4}-\d{2}-\d{2}$/)
 })
 
+test('listTranscripts walks each folder once: a symlink cycle ends, an aliasing folder adds nothing, the direct path is kept', async () => {
+  const { listTranscripts } = await import('../src/analyze.js')
+  const { realpathSync, symlinkSync } = await import('node:fs')
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'vetobench-')))
+  try {
+    const root = join(dir, 'projects')
+    mkdirSync(join(root, 'p', 'subagents'), { recursive: true })
+    mkdirSync(join(dir, 'outside'))
+    writeFileSync(join(root, 'p', 'a.jsonl'), '{}\n')
+    writeFileSync(join(root, 'p', 'subagents', 'agent-1.jsonl'), '{}\n')
+    writeFileSync(join(dir, 'outside', 'o.jsonl'), '{}\n')
+    symlinkSync(root, join(root, 'p', 'loop')) // projects/p/loop -> projects
+    symlinkSync(join(root, 'p'), join(root, 'a-alias')) // sorts before p, and aliases it
+    symlinkSync(join(dir, 'outside'), join(root, 'linked')) // a folder linked in from elsewhere is still read
+    assert.deepEqual(listTranscripts(root), [join(root, 'linked', 'o.jsonl'), join(root, 'p', 'a.jsonl'), join(root, 'p', 'subagents', 'agent-1.jsonl')])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the assignment secret shape runs in linear time on a long run of name characters', async () => {
+  const { SECRET_PATTERNS } = await import('../src/analyze.js')
+  const rx = SECRET_PATTERNS.find(([k]) => k === 'assignment')[2]
+  const t0 = Date.now()
+  for (const hostile of ['TOKEN'.repeat(40000), 'A'.repeat(100000) + 'SECRET' + 'B'.repeat(100000), '_PK'.repeat(50000) + '= x']) {
+    assert.equal(rx.test(hostile), false)
+  }
+  assert.ok(Date.now() - t0 < 1000, 'bounded name parts')
+  const value = ['FAKE', 'FAKE', 'FAKE', '1234'].join('')
+  assert.ok(rx.test(`export SESSION_SECRET=${value}`) && rx.test(`MY_APP_API_KEY = "${value}"`) && rx.test(`\\nGITHUB_TOKEN=${value}`))
+})
+
