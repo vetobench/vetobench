@@ -213,7 +213,7 @@ export async function planFix({ dir, since = null, until = null, home, cwd, incl
 }
 
 /** True when a folder (followed through symlinks) lies inside a git working tree, such as a dotfiles repository. */
-function insideGit(dir) {
+export function insideGit(dir) {
   let d
   try { d = realpathSync(dir) } catch { return false }
   for (;;) {
@@ -224,10 +224,10 @@ function insideGit(dir) {
   }
 }
 
-const stamp = (now) => now.toISOString().replace(/[-:]/g, '').replace('Z', '') + 'Z'
+export const stamp = (now) => now.toISOString().replace(/[-:]/g, '').replace('Z', '') + 'Z'
 
 /** Create a file that only the owner can read, failing if it exists. */
-function writePrivate(path, data) {
+export function writePrivate(path, data) {
   const fd = openSync(path, 'wx', 0o600)
   try { writeSync(fd, data) } finally { closeSync(fd) }
 }

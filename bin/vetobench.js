@@ -10,6 +10,7 @@ import { ruleScopes } from '../src/settings.js'
 import { SECRET_CATEGORIES, scanSecrets } from '../src/secrets.js'
 import { replayCommand } from '../src/replay.js'
 import { fixCommand } from '../src/fix.js'
+import { scrubCommand } from '../src/scrub.js'
 
 // One source of truth: the version in package.json (the release workflow checks the tag against it).
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
@@ -29,6 +30,7 @@ Usage: npx vetobench [transcripts-dir] [--since YYYY-MM-DD] [--until YYYY-MM-DD]
 
   replay            how often "ask before production writes" would have asked (vetobench replay --help)
   fix               remove secret, wildcard and never-used allow-rules; a dry run unless --write (vetobench fix --help)
+  scrub             redact secrets left in plain text in your transcripts; a dry run unless --write (vetobench scrub --help)
 
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 
@@ -167,6 +169,12 @@ async function main() {
   if (process.argv[2] === 'fix') {
     const { text, code } = await fixCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects'),
       home: homedir(), cwd: process.cwd() })
+    console.log(text)
+    process.exitCode = code
+    return
+  }
+  if (process.argv[2] === 'scrub') {
+    const { text, code } = await scrubCommand(process.argv.slice(3), { version: VERSION, defaultDir: join(homedir(), '.claude', 'projects'), home: homedir() })
     console.log(text)
     process.exitCode = code
     return
