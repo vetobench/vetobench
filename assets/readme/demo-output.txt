@@ -2,7 +2,7 @@ Example output: the real CLI run on the synthetic transcripts in test/fixtures/d
 test/fixtures/demo-home/. Not anyone's real numbers. Regenerate with: python3 -I assets/readme/make_demo.py svg
 
 $ npx vetobench
-vetobench 0.1.0: who approved your agent's actions
+vetobench 0.2.0: who approved your agent's actions
 7 transcripts · 2026-11-03 to 2026-11-17 · 186 of 190 tool calls carry a recorded decision
 
   Static allow-rule (single command)                        107    57.5%
@@ -28,7 +28,7 @@ Run with --secrets to also count passwords, keys and tokens left in your transcr
 Not counted: approvals you give in chat. Nothing left this machine.
 
 $ npx vetobench fix
-vetobench 0.1.0 fix: what --write would remove from your allow-rules
+vetobench 0.2.0 fix: what --write would remove from your allow-rules
 History: 7 transcripts · 2026-11-03 to 2026-11-17 (15 day(s))
 Settings files: 1 checked.
 
@@ -42,7 +42,7 @@ Dry run: nothing was changed. Run with --write to apply; each file is backed up 
 Counts only: no rule, path or secret is printed. Nothing left this machine.
 
 $ npx vetobench replay
-vetobench 0.1.0 replay: how often would "ask before production writes" have asked?
+vetobench 0.2.0 replay: how often would "ask before production writes" have asked?
 7 transcripts · 2026-11-03 to 2026-11-17 · 122 shell commands
 Policy: built-in (12 categories). Add your own hosts and rules with --policy <file>.
 

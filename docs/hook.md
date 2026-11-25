@@ -82,6 +82,10 @@ The hook runs before every shell command your agent runs, so each run should sta
 
 ## Limits
 
+- **Where Claude Code reads its settings.** `install` edits `~/.claude/settings.json` (or the project's `settings.local.json` with `--project`). If you run Claude Code with `CLAUDE_CONFIG_DIR` pointing elsewhere, it never reads that file, so the hook will not run. Managed settings with `disableAllHooks` or `allowManagedHooksOnly` also stop it from running; `install` still says it installed the hook, because it does not read managed settings.
+- **Headless runs.** In `claude -p` and other non-interactive runs there is nobody to answer the prompt; check what your setup does with an "ask" there before you rely on it.
+- **Uninstall tidies up.** Removing the hook also removes a `PreToolUse` list, and a `hooks` object, that end up empty, even if they were empty before you installed it.
+- **A failed write keeps its backup.** If `--write` backs a file up and then cannot write it (a read-only folder, for example), the file is unchanged and the backup folder stays in `~/.claude/vetobench-backups/`; delete it if you like.
 - **A heuristic, not a security boundary.** The hook reads command text. It does not run the command, follow aliases, functions or the scripts a command calls, or see what a program does once it runs. The [replay limits](../METHODOLOGY.md#replay-limits) apply as they are: a bare `git push` pushes the current branch, which the command does not show, so it is not asked. A determined or confused agent can write a command it does not recognise.
 - **Bash only.** File edits and MCP tools are not checked.
 - **It fails open.** A policy file that breaks after install (moved, deleted or edited into invalid JSON) switches the guard off silently. Re-run the `echo … | vetobench hook run` check after you change the policy.
