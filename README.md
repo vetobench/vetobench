@@ -9,6 +9,8 @@
 
 [![CI](https://github.com/vetobench/vetobench/actions/workflows/ci.yml/badge.svg)](https://github.com/vetobench/vetobench/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/vetobench/vetobench/badge)](https://scorecard.dev/viewer/?uri=github.com/vetobench/vetobench) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-lightgrey)](LICENSE) [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-lightgrey)](#is-it-safe-to-run) [![Network: none](https://img.shields.io/badge/network-none-FF5A1F)](#is-it-safe-to-run)
 
+[vetobench.com](https://vetobench.com) · [Methodology](https://vetobench.com/methodology) · [Claims ledger](https://vetobench.com/claims)
+
 ### In 30 days I approved 12 of my coding agent's 236,734 actions myself.
 
 Static allow-rules and an AI classifier approved almost all the rest. vetobench shows you the same split for your own agent, from the transcripts already on your machine.

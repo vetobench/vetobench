@@ -9,6 +9,8 @@ Corrections to published numbers go here as **retractions**: the claim as publis
 ### Docs
 
 - `docs/hook.md`: tested how the hook's "ask" meets Claude Code's permissions (Claude Code 2.1.332, headless). A matching allow-rule did not override it, nor did `bypassPermissions`; `dontAsk` turns it into a denial. The interactive dialog itself was not observed. Replaces the "the documentation does not say" caveats.
+- `docs/hook.md`: also tested inside subagents (foreground and background): the hook runs for their shell commands and its ask holds them, as in the main session.
+- README: links to vetobench.com, the methodology page and the claims ledger.
 
 ## 0.2.0 (2026-11-25)
 
