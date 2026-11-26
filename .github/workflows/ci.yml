@@ -73,9 +73,11 @@ jobs:
             echo "::error::hook uninstall left the hook in place"
             exit 1
           fi
+          # exit 1 alone could be a crash: the output must name the deliberate verdict
           status=0
-          offline env HOME="$RUNNER_TEMP/hk" node bin/vetobench.js hook test || status=$?
+          out=$(offline env HOME="$RUNNER_TEMP/hk" node bin/vetobench.js hook test) || status=$?
           test "$status" -eq 1
+          printf '%s\n' "$out" | grep -qF 'no vetobench hook in this file'
           # scrub --write on a throwaway copy of the secrets fixtures, aged past the open-session guard, with a
           # throwaway home for the backups; the committed fixtures must stay as they are
           cp -R test/fixtures/secrets "$RUNNER_TEMP/scrub"

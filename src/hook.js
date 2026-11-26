@@ -509,13 +509,35 @@ function onPath(name, env, platform) {
   return null
 }
 
-const VERSION_TEXT = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]{1,40})?$/
-/** The version of the vetobench package a script belongs to (the real path's bin/ folder, one level up), or null. */
+/** The only version strings ever printed: anything else in a package.json is "an unrecognised version". */
+const VERSION_TEXT = /^\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)(?:\.\d+)?)?$/
+/** The first version with `vetobench hook`: an older one exits with an error on `hook run`. */
+const HOOK_SINCE = '0.2.0'
+const PRE = ['alpha', 'beta', 'rc']
+
+/** Two VERSION_TEXT versions compared: below, at or above 0. A pre-release sorts before its release. core: only x.y.z. */
+function compareVersions(a, b, { core = false } = {}) {
+  const parse = (v) => {
+    const [x, pre] = v.split('-')
+    const [tag, n] = pre ? pre.split('.') : []
+    return [...x.split('.').map(Number), pre ? PRE.indexOf(tag) : PRE.length, n === undefined ? -1 : Number(n)]
+  }
+  const p = parse(a)
+  const q = parse(b)
+  for (let i = 0; i < (core ? 3 : 5); i++) if (p[i] !== q[i]) return p[i] - q[i]
+  return 0
+}
+
+/**
+ * The version of the vetobench package a script belongs to (the real path's bin/ folder, one level up): { version }
+ * when it is one VERSION_TEXT accepts, { unrecognised: true } for a vetobench package with any other version, or null
+ * when there is no vetobench package.json there.
+ */
 function packageVersion(script) {
-  try {
-    const pkg = JSON.parse(readFileSync(join(dirname(dirname(realpathSync(script))), 'package.json'), 'utf8'))
-    return pkg?.name === 'vetobench' && typeof pkg.version === 'string' && VERSION_TEXT.test(pkg.version) ? pkg.version : null
-  } catch { return null }
+  let pkg
+  try { pkg = JSON.parse(readFileSync(join(dirname(dirname(realpathSync(script))), 'package.json'), 'utf8')) } catch { return null }
+  if (pkg?.name !== 'vetobench') return null
+  return typeof pkg.version === 'string' && VERSION_TEXT.test(pkg.version) ? { version: pkg.version } : { unrecognised: true }
 }
 
 /** A settings file as Claude Code reads it (plain JSON, a BOM tolerated): the object, or null. */
@@ -536,6 +558,43 @@ function bashCoverage(matcher) {
   return 'no'
 }
 
+/** The vetobench handlers in a hooks setting's PreToolUse groups, each with its group: [{ group, handler }]. */
+const ourHandlers = (hooks) => (isObject(hooks) && Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : [])
+  .flatMap((group) => (Array.isArray(group?.hooks) ? group.hooks : []).filter(isVetobenchHook).map((handler) => ({ group, handler })))
+
+/**
+ * One file's vetobench handlers, summed up: the one the checks test (the first whose group's matcher covers Bash, else
+ * the first), and a level and text for the count and the matcher.
+ */
+function describeHandlers(list) {
+  const n = list.length
+  const target = list.find((x) => bashCoverage(x.group.matcher) === 'yes') ?? list[0]
+  const cover = bashCoverage(target.group.matcher)
+  if (cover !== 'yes') {
+    return { target, level: 'fail', text: n > 1 ? `${num(n)} vetobench hooks, and none of their matchers covers Bash, so they never run`
+      : cover === 'invalid' ? '1 vetobench hook, but its matcher is not a valid pattern, so it never runs'
+        : '1 vetobench hook, but its matcher does not cover Bash, so it never runs before a shell command' }
+  }
+  if (n === 1) return { target, level: 'ok', text: '1 vetobench hook, matcher covers Bash' }
+  return { target, level: 'warn', text: `${num(n)} vetobench hooks (the checks below test the first whose matcher covers Bash); ` +
+    'identical ones run once, different ones each run: keep one' }
+}
+
+/** Fields a hand edit may add to the handler (install writes only type, command and timeout): [level, text] pairs. */
+function handlerProblems(h) {
+  if (h.type !== 'command') return [['fail', 'its type is not "command", so Claude Code does not run it as a shell command']]
+  const out = []
+  if (h.async === true || h.asyncRewake === true) out.push(['warn', 'async: it runs in the background, so Claude Code does not wait for its ask'])
+  if (h.if !== undefined) out.push(['warn', 'an "if" condition: it runs only for the calls that rule matches'])
+  if (h.timeout !== undefined && !(typeof h.timeout === 'number' && h.timeout > 0)) {
+    out.push(['warn', 'a timeout that is not a positive number of seconds'])
+  }
+  if (h.onFailure === 'block') {
+    out.push(['note', 'onFailure "block": when the hook fails or cannot start, Claude Code blocks the command instead of running it'])
+  }
+  return out
+}
+
 /** A loadPolicy error as fixed text: its messages name a field, never a value or the path. */
 const policyProblem = (e) => {
   const m = String(e?.message ?? '')
@@ -552,56 +611,104 @@ const ON_PATH = 'found on this PATH; the hook depends on the PATH Claude Code gi
 const RELATIVE = 'a relative path, which depends on the folder Claude Code runs the hook in'
 
 /**
- * `vetobench hook test`: checks the hook in the file install writes (~/.claude/settings.json, or with project this
- * folder's .claude/settings.local.json) without starting Claude Code and without writing anything. Returns { project,
- * skipped, checks: [{ label, level, text }] }, level one of ok, note, warn, fail. Labels and texts are fixed apart from
+ * `vetobench hook test`: checks the hook that runs for the file install writes (~/.claude/settings.json, or with project
+ * this folder's .claude/settings.local.json), without starting Claude Code and without writing anything. That is the
+ * file's vetobench hook, or the managed settings' one when they allow only their own hooks or the file holds none.
+ * Returns { project, managed, skipped, checks: [{ label, level, text }] }: level is ok, note, warn, fail or skip (could
+ * not check); managed is true when the hook tested is the managed settings' one. Labels and texts are fixed apart from
  * counts, error codes and version strings: paths, commands and rules stay in memory. version: the running vetobench's.
  */
 export function testHook({ home, cwd, project = false, env = process.env, platform = process.platform, managed = managedDir(platform),
   version = '' }) {
   const checks = []
   const add = (label, level, text) => checks.push({ label, level, text })
-  const install = `vetobench hook install${project ? ' --project' : ''}`
+
+  // What Claude Code reads: the user file (where CLAUDE_CONFIG_DIR says), this folder's project files and the managed
+  // files. A key's value is the one from the file of highest precedence that sets it: managed, local, project, user.
+  const configDir = typeof env.CLAUDE_CONFIG_DIR === 'string' && env.CLAUDE_CONFIG_DIR.trim() ? resolve(cwd, env.CLAUDE_CONFIG_DIR) : null
+  const homeConfig = join(home, '.claude')
+  const otherConfig = configDir && (real(configDir) ?? configDir) !== (real(homeConfig) ?? homeConfig) ? configDir : null
+  const layers = []
+  const seen = new Set()
+  for (const [scope, p] of [['user', join(configDir ?? homeConfig, 'settings.json')], ['project', join(cwd, '.claude', 'settings.json')],
+    ['local', join(cwd, '.claude', 'settings.local.json')]]) {
+    const key = real(p) ?? p
+    if (seen.has(key)) continue // a session in the home folder: its project file is the user file
+    seen.add(key)
+    const s = readLoose(p)
+    if (s) layers.push({ scope, s })
+  }
+  const mg = readManaged(managed)
+  for (const s of mg.values) layers.push({ scope: 'managed', s })
+  const managedOnly = mg.values.reduce((v, s) => (typeof s.allowManagedHooksOnly === 'boolean' ? s.allowManagedHooksOnly : v), false)
+  const managedOurs = mg.values.flatMap((s) => ourHandlers(s.hooks))
 
   // 1. The settings file, read as install reads it.
   const read = readPlain(settingsFile({ home, cwd, project }))
   let obj = null
-  if (!read.exists) add('settings file', 'fail', `no settings file there; run ${install}`)
-  else if (read.error === 'unreadable') add('settings file', 'fail', `could not be read (${read.detail})`)
+  let file
+  if (!read.exists) file = ['fail', 'no settings file there']
+  else if (read.error === 'unreadable') file = ['fail', `could not be read (${read.detail})`]
   else if (read.error === 'not-json') {
     obj = read.buf.subarray(0, 3).equals(BOM) ? parsePlain(read.buf.subarray(3)) : null
-    if (obj) add('settings file', 'warn', 'JSON after a BOM: Claude Code reads it, but hook install and uninstall leave such a file alone')
-    else add('settings file', 'fail', 'not plain JSON (comments, a trailing comma or a syntax error), so Claude Code may skip it')
+    file = obj ? ['warn', 'JSON after a BOM: Claude Code reads it, but hook install and uninstall leave such a file alone']
+      : ['fail', 'not plain JSON (comments, a trailing comma or a syntax error), so Claude Code reports a settings error and does not apply it']
   } else {
     obj = read.obj
-    add('settings file', 'ok', 'plain JSON')
+    file = ['ok', 'plain JSON']
   }
-
-  // 2. The vetobench hook in it, and the matcher of its group.
-  let ours = null
-  if (obj) {
-    const pre = obj.hooks?.PreToolUse
-    if ((obj.hooks !== undefined && !isObject(obj.hooks)) || (pre !== undefined && !Array.isArray(pre))) {
-      add('installed', 'fail', 'the "hooks" setting is not laid out the way Claude Code documents it')
-    } else {
-      const found = (pre ?? []).flatMap((g) => (Array.isArray(g?.hooks) ? g.hooks : []).filter(isVetobenchHook).map((h) => ({ group: g, handler: h })))
-      if (!found.length) add('installed', 'fail', `no vetobench hook in this file; run ${install}`)
-      else {
-        ours = found[0]
-        const n = found.length
-        const cover = bashCoverage(ours.group.matcher)
-        const head = n === 1 ? '1 vetobench hook' : `${num(n)} vetobench hooks (the checks below test the first)`
-        const tail = cover === 'yes' ? 'matcher covers Bash' : cover === 'invalid' ? 'its matcher is not a valid pattern, so it never runs'
-          : 'its matcher does not cover Bash, so it never runs before a shell command'
-        add('installed', cover !== 'yes' ? 'fail' : n > 1 ? 'warn' : 'ok',
-          `${head}, ${tail}${n > 1 ? '; identical ones run once, different ones each run: keep one' : ''}`)
-      }
+  const shapeBad = Boolean(obj) && ((obj.hooks !== undefined && !isObject(obj.hooks)) ||
+    (obj.hooks?.PreToolUse !== undefined && !Array.isArray(obj.hooks.PreToolUse)))
+  const found = obj && !shapeBad ? ourHandlers(obj.hooks) : []
+  // The hook that runs is the managed settings' one when they allow only their own hooks, or when this file has none.
+  // This file's problems then do not stop the guard: they are notes.
+  const useManaged = managedOurs.length > 0 && (managedOnly || !found.length)
+  const mine = (level) => (useManaged && level !== 'ok' ? 'note' : level)
+  // Where to look instead: the other file vetobench hook test reads, when it holds one. Never advice to add a second hook.
+  const advice = () => {
+    if (ourHandlers(readLoose(project ? join(homeConfig, 'settings.json') : join(cwd, '.claude', 'settings.local.json'))?.hooks).length) {
+      return project ? 'there is one in your global settings: run vetobench hook test'
+        : "there is one in this folder's personal settings: run vetobench hook test --project"
     }
+    return `run vetobench hook install${project ? ' --project' : ''}`
+  }
+  add('settings file', mine(file[0]), !read.exists && !useManaged ? `${file[1]}; ${advice()}` : file[1])
+
+  // 2. The vetobench hooks in it and the matcher of their group, and the managed one when that is the one that runs.
+  let target = null
+  if (shapeBad) add('installed', mine('fail'), 'the "hooks" setting is not laid out the way Claude Code documents it')
+  else if (obj && !found.length) add('installed', mine('fail'), `no vetobench hook in this file${useManaged ? '' : `; ${advice()}`}`)
+  else if (found.length) {
+    const d = describeHandlers(found)
+    add('installed', mine(d.level), d.text)
+    if (!useManaged) target = d.target
+  }
+  if (useManaged) {
+    const d = describeHandlers(managedOurs)
+    target = d.target
+    const why = managedOnly ? `the managed settings allow only their own hooks${found.length ? ", so this file's do not run" : ''}`
+      : 'the managed settings hold one, which runs in every session'
+    add('managed hook', d.level === 'fail' ? 'fail' : (managedOnly && found.length) || d.level === 'warn' ? 'warn' : 'note',
+      `${why}; the checks below test theirs: ${d.text}`)
   }
 
-  // 3-8. Its command: what it runs, whether those files are there, its policy, one ask and one silence.
-  const shape = ours ? parseHookCommand(ours.handler.command) : null
-  if (ours && !shape) add('command shape', 'fail', 'not a command this check can read (shell operators, variables or quoting it does not follow)')
+  // 3. The handler's own fields.
+  if (target) {
+    const h = target.handler
+    const issues = handlerProblems(h)
+    const timeout = typeof h.timeout === 'number' ? `timeout ${num(h.timeout)} s` : "Claude Code's default timeout"
+    if (!issues.length) add('handler', 'ok', `a command hook, ${timeout}`)
+    for (const [level, text] of issues) add('handler', level, text)
+  }
+
+  // 4-9. Its command: what it runs, whether those files are there, its policy, one ask and one silence.
+  const failsOpen = target?.handler.onFailure === 'block'
+    ? 'the hook fails before each command, and with onFailure "block" Claude Code then blocks every shell command' : FAILS_OPEN
+  const shape = target ? parseHookCommand(target.handler.command) : null
+  if (target && !shape) {
+    add('command shape', 'skip', 'could not check: the command uses shell syntax this check does not follow (a redirect, $VAR, ~ or the like), ' +
+      'so it was probably edited by hand; the checks of its paths and policy were skipped')
+  }
   if (shape) {
     if (shape.extra) add('command shape', 'fail', 'hook run is given options it does not take, so it stays silent on every command')
     else if (shape.npx) {
@@ -617,13 +724,13 @@ export function testHook({ home, cwd, project = false, env = process.env, platfo
         const node = onPath('node', env, platform)
         add('node', node ? 'warn' : 'fail', node
           ? 'none named: vetobench finds node on this PATH, so the hook depends on the PATH Claude Code gives hooks'
-          : `none named, and none on PATH: ${FAILS_OPEN}`)
+          : `none named, and none on PATH: ${failsOpen}`)
       } else if (isAbsolute(r)) {
         const ok = executable(r)
-        add('node', ok ? 'ok' : 'fail', ok ? 'found and executable' : `${isFile(r) ? 'not executable' : 'missing'}: ${FAILS_OPEN}`)
+        add('node', ok ? 'ok' : 'fail', ok ? 'found and executable' : `${isFile(r) ? 'not executable' : 'missing'}: ${failsOpen}`)
       } else if (!/[\\/]/.test(r)) {
         const p = onPath(r, env, platform)
-        add('node', p ? 'warn' : 'fail', p ? ON_PATH : `not found on PATH: ${FAILS_OPEN}`)
+        add('node', p ? 'warn' : 'fail', p ? ON_PATH : `not found on PATH: ${failsOpen}`)
       } else add('node', 'warn', RELATIVE)
 
       const e = shape.entry
@@ -631,16 +738,28 @@ export function testHook({ home, cwd, project = false, env = process.env, platfo
       if (isAbsolute(e)) {
         // Without a runner, the shell runs the script itself, so it must be executable.
         if (r === null ? executable(e) : isFile(e)) script = e
-        else add('vetobench', 'fail', `${isFile(e) ? 'not executable' : 'missing'}: ${FAILS_OPEN}`)
+        else add('vetobench', 'fail', `${isFile(e) ? 'not executable' : 'missing'}: ${failsOpen}`)
       } else if (r === null && !/[\\/]/.test(e)) {
         script = onPath(e, env, platform)
-        if (!script) add('vetobench', 'fail', `not found on PATH: ${FAILS_OPEN}`)
+        if (!script) add('vetobench', 'fail', `not found on PATH: ${failsOpen}`)
       } else add('vetobench', 'warn', RELATIVE)
       if (script) {
         const v = packageVersion(script)
-        add('vetobench', isAbsolute(e) ? 'ok' : 'warn', `${isAbsolute(e) ? 'found' : ON_PATH}${v ? ` (vetobench ${v})` : ''}`)
-        if (!v) add('version', 'note', `the installed hook's version could not be read; this check used ${version}'s policy matcher`)
-        else if (v !== version) add('version', 'note', `the installed hook runs vetobench ${v}; this check used ${version}'s policy matcher`)
+        const shown = v?.version ? ` (vetobench ${v.version})` : v?.unrecognised ? ' (an unrecognised version)' : ''
+        add('vetobench', isAbsolute(e) ? 'ok' : 'warn', `${isAbsolute(e) ? 'found' : ON_PATH}${shown}`)
+        // The asks and stays silent checks run this copy's matcher, not the installed one's.
+        const self = VERSION_TEXT.test(version) ? version : null
+        const used = "the asks and stays silent checks used this copy's matcher"
+        if (!v) add('version', 'note', `the installed hook's version could not be read; ${used}`)
+        else if (v.unrecognised) add('version', 'note', `the installed hook runs an unrecognised version of vetobench; ${used}`)
+        else if (compareVersions(v.version, HOOK_SINCE, { core: true }) < 0) {
+          add('version', 'fail', `the installed hook runs vetobench ${v.version}, which has no hook command: ${failsOpen}. ` +
+            'Update it with npm install -g vetobench')
+        } else if (self && compareVersions(v.version, self) < 0) {
+          add('version', 'warn', `the installed hook runs vetobench ${v.version}, older than this copy (${self}): ${used}, not the installed one`)
+        } else if (self && compareVersions(v.version, self) > 0) {
+          add('version', 'note', `the installed hook runs vetobench ${v.version}, newer than this copy (${self}): ${used}`)
+        }
       }
     }
 
@@ -671,46 +790,40 @@ export function testHook({ home, cwd, project = false, env = process.env, platfo
     }
   }
 
-  // 9. Settings that turn hooks off: the user file (where CLAUDE_CONFIG_DIR says), this folder's project files and the
-  // managed files. A key's value is the one from the file of highest precedence that sets it: managed, local, project, user.
-  const configDir = typeof env.CLAUDE_CONFIG_DIR === 'string' && env.CLAUDE_CONFIG_DIR.trim() ? resolve(cwd, env.CLAUDE_CONFIG_DIR) : null
-  const layers = []
-  const seen = new Set()
-  for (const [scope, p] of [['user', join(configDir ?? join(home, '.claude'), 'settings.json')], ['project', join(cwd, '.claude', 'settings.json')],
-    ['local', join(cwd, '.claude', 'settings.local.json')]]) {
-    const key = real(p) ?? p
-    if (seen.has(key)) continue // a session in the home folder: its project file is the user file
-    seen.add(key)
-    const s = readLoose(p)
-    if (s) layers.push({ scope, s })
-  }
-  const mg = readManaged(managed)
-  for (const s of mg.values) layers.push({ scope: 'managed', s })
-  const off = layers.reduce((v, l) => (typeof l.s.disableAllHooks === 'boolean' ? (l.s.disableAllHooks ? l.scope : null) : v), null)
-  const managedOnly = mg.values.reduce((v, s) => (typeof s.allowManagedHooksOnly === 'boolean' ? s.allowManagedHooksOnly : v), false)
+  // 10. Settings that stop the hook. disableAllHooks takes the value left after precedence; only a managed value can turn
+  // off a managed hook. allowManagedHooksOnly blocks every hook outside managed settings.
+  const relevant = useManaged ? layers.filter((l) => l.scope === 'managed') : layers
+  const off = relevant.reduce((v, l) => (typeof l.s.disableAllHooks === 'boolean' ? (l.s.disableAllHooks ? l.scope : null) : v), null)
+  const blocked = managedOnly && !useManaged
   if (off) add('hooks enabled', 'fail', `turned off by disableAllHooks in the ${off} settings`)
-  if (managedOnly) {
-    const there = mg.values.some((s) => handlers(isObject(s.hooks) ? s.hooks.PreToolUse : null).some(isVetobenchHook))
-    add('hooks enabled', there ? 'note' : 'fail', there
-      ? 'managed settings allow only their own hooks: the vetobench hook there runs, this one does not'
-      : 'managed settings allow only their own hooks (allowManagedHooksOnly), so this one never runs')
+  if (blocked) {
+    add('hooks enabled', 'fail', 'the managed settings allow only their own hooks (allowManagedHooksOnly), so a vetobench hook here never runs')
   }
-  if (!off && !managedOnly) add('hooks enabled', 'ok', `${num(layers.length)} settings file(s) read; none turns hooks off`)
+  if (!off && !blocked) {
+    add('hooks enabled', 'ok', `${num(layers.length)} settings file(s) read; none turns ${useManaged ? 'the managed hook' : 'hooks'} off`)
+  }
   if (mg.unreadable) add('hooks enabled', 'note', `${num(mg.unreadable)} managed settings file(s) could not be read; they may turn hooks off`)
 
-  // 10. Another config folder.
-  if (configDir && !project && (real(configDir) ?? configDir) !== (real(join(home, '.claude')) ?? join(home, '.claude'))) {
-    add('config dir', 'warn', 'CLAUDE_CONFIG_DIR is set: Claude Code reads its settings from there, so ~/.claude/settings.json may not apply')
+  // 11. Another config folder: Claude Code then reads the user settings there, not in ~/.claude.
+  if (otherConfig && !project) {
+    const there = ourHandlers(readLoose(join(otherConfig, 'settings.json'))?.hooks).length > 0
+    add('config dir', 'warn', 'CLAUDE_CONFIG_DIR is set: Claude Code reads its user settings from there, not from ~/.claude/settings.json; ' +
+      (there ? 'the settings there hold a vetobench hook, which this check did not test' : 'the settings there hold no vetobench hook'))
   }
 
-  // 11. A default permission mode that changes what an ask does (tested, see docs/hook.md).
-  const mode = layers.reduce((v, l) => (typeof l.s.permissions?.defaultMode === 'string' ? l.s.permissions.defaultMode : v), null)
+  // 12. A default permission mode that changes what an ask does (tested, see docs/hook.md). bypassPermissions and auto
+  // as a default take effect only from user or managed settings.
+  const mode = layers.reduce((v, l) => {
+    const m = l.s.permissions?.defaultMode
+    if (typeof m !== 'string' || ((m === 'bypassPermissions' || m === 'auto') && (l.scope === 'project' || l.scope === 'local'))) return v
+    return m
+  }, null)
   if (mode === 'bypassPermissions') {
     add('permission mode', 'note', "default mode bypassPermissions: in a test on Claude Code 2.1.332 the hook's ask still held")
   }
   if (mode === 'dontAsk') add('permission mode', 'note', "default mode dontAsk: the hook's asks become denials (tested on Claude Code 2.1.332)")
 
-  return { project, skipped: !ours, checks }
+  return { project, managed: useManaged, skipped: !target, checks }
 }
 
 // ---- CLI ----
@@ -728,7 +841,7 @@ Usage: vetobench hook install [--write] [--project] [--policy FILE]
               asks you when the replay policy would have asked. Needs a global install: npm install -g vetobench
   uninstall   remove the vetobench hook from that file
   test        check the installed hook without starting Claude Code: the file, the node, vetobench and policy its
-              command names, one ask and one silence, settings that turn hooks off. Only reads; exits 1 on a problem
+              command names, one ask and one silence, settings that turn hooks off. Only reads; exits 1 unless ready
   run         the hook itself: reads Claude Code's PreToolUse JSON on stdin and prints the "ask" answer, or nothing.
               On bad input or an unreadable policy it prints nothing and exits 0, so a broken hook never blocks the agent
   --write     apply the change; without it, only show what would change. The file is first copied into
@@ -827,15 +940,21 @@ export function renderHookTest(r, version) {
   const count = (level) => r.checks.filter((c) => c.level === level).length
   const fails = count('fail')
   const warns = count('warn')
-  const head = `${fails ? `${plural(fails, 'problem')} found` : 'the hook is ready'}${warns ? `, ${plural(warns, 'warning')}` : ''}`
-  const lines = [`vetobench ${version} hook test: ${head}`, `Settings file: ${PLACES[r.project ? 'project' : 'global']}.`, '']
+  const skips = count('skip')
+  const verdict = fails ? `${plural(fails, 'problem')} found${skips ? "; could not check the hook's command" : ''}`
+    : skips ? 'could not check the hook' : 'the hook is ready'
+  const lines = [`vetobench ${version} hook test: ${verdict}${warns ? `, ${plural(warns, 'warning')}` : ''}`,
+    `Settings file: ${PLACES[r.project ? 'project' : 'global']}.`, '']
   const width = Math.max(...r.checks.map((c) => c.label.length))
   for (const c of r.checks) lines.push(`  ${c.level.padEnd(4)}  ${c.label.padEnd(width)}  ${c.text}`)
   const flag = r.project ? ' --project' : ''
   const failed = (label) => r.checks.some((c) => c.level === 'fail' && c.label === label)
-  if (r.skipped) lines.push('', "The checks of the hook's command, its paths and its policy need a vetobench hook in this file, so they did not run.")
-  if (failed('command shape') || failed('node') || failed('vetobench')) {
-    lines.push('', `To repair it, run \`vetobench hook uninstall --write${flag}\`, then \`vetobench hook install --write${flag}\`.`)
+  if (r.skipped) lines.push('', "The checks of the hook's command, its paths and its policy need a vetobench hook, so they did not run.")
+  // A moved install or options hook run does not take: a fresh install writes the command again. Not for a command
+  // this check could not read (likely edited by hand), nor for the managed settings' hook, which is not yours to edit.
+  if (failed('command shape') || failed('node') || failed('vetobench') || failed('version')) {
+    lines.push('', r.managed ? 'The vetobench hook in the managed settings needs a repair: tell whoever deploys them.'
+      : `To repair it, run \`vetobench hook uninstall --write${flag}\`, then \`vetobench hook install --write${flag}\`.`)
   }
   if (failed('policy')) lines.push('', 'To see what is wrong with the policy, run `vetobench replay --policy FILE` with its file.')
   lines.push('')
@@ -847,7 +966,7 @@ export function renderHookTest(r, version) {
 
 /**
  * `vetobench hook …`: returns { text, code }. `run` always exits 0 (fail open). install and uninstall exit 1 when they
- * refuse (dry run or not) or when --write leaves the file unchanged. test exits 1 when a check fails.
+ * refuse (dry run or not) or when --write leaves the file unchanged. test exits 1 when a check fails or could not run.
  */
 export async function hookCommand(argv, { version, home, cwd, stdin, env = process.env, execPath = process.execPath, platform = process.platform,
   managed = managedDir(platform), bin = BIN, now = new Date() }) {
@@ -859,7 +978,7 @@ export async function hookCommand(argv, { version, home, cwd, stdin, env = proce
   if (o.help) return { text: hookHelp(version), code: 0 }
   if (action === 'test') {
     const r = testHook({ home, cwd, project: o.project, env, platform, managed, version })
-    return { text: renderHookTest(r, version), code: r.checks.some((c) => c.level === 'fail') ? 1 : 0 }
+    return { text: renderHookTest(r, version), code: r.checks.some((c) => c.level === 'fail' || c.level === 'skip') ? 1 : 0 }
   }
   const plan = planHook({ action, home, cwd, project: o.project, policyFile: o.policy, bin, env, execPath, platform })
   const res = o.write && !plan.refusal ? applyHook(plan, { home, now }) : null

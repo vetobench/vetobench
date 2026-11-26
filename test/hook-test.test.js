@@ -50,7 +50,8 @@ const noLeaks = (text, t) => {
 }
 
 /** The check lines of a rendered test: [[level, label, text]]. */
-const rows = (text) => text.split('\n').map((l) => /^ {2}(ok|note|warn|fail) +(\S+(?: \S+)*) {2,}(.*)$/.exec(l)).filter(Boolean).map((m) => m.slice(1))
+const rows = (text) => text.split('\n').map((l) => /^ {2}(ok|note|warn|fail|skip) +(\S+(?: \S+)*) {2,}(.*)$/.exec(l)).filter(Boolean)
+  .map((m) => m.slice(1))
 const levelOf = (r, label) => r.rows.filter((x) => x[1] === label).map((x) => x[0]).join(',')
 const textOf = (r, label) => r.rows.filter((x) => x[1] === label).map((x) => x[2]).join(' | ')
 
@@ -84,7 +85,8 @@ function fakePackage(t, pkg) {
   return join(dir, 'bin', 'vetobench.js')
 }
 
-const HEALTHY = ['settings file', 'installed', 'command shape', 'node', 'vetobench', 'policy', 'asks', 'stays silent', 'hooks enabled']
+const HEALTHY = ['settings file', 'installed', 'handler', 'command shape', 'node', 'vetobench', 'policy', 'asks', 'stays silent', 'hooks enabled']
+const REPAIR = /To repair it, run `vetobench hook uninstall --write`, then `vetobench hook install --write`\./
 
 test('hook test: a healthy install is ready (exit 0), every check ok, and nothing is written', async () => {
   const t = layout()
@@ -98,6 +100,7 @@ test('hook test: a healthy install is ready (exit 0), every check ok, and nothin
     assert.match(r.text, /Settings file: your global settings \(~\/\.claude\/settings\.json\)\./)
     assert.deepEqual(r.rows.map((x) => x.slice(0, 2)), HEALTHY.map((label) => ['ok', label]))
     assert.equal(textOf(r, 'installed'), '1 vetobench hook, matcher covers Bash')
+    assert.equal(textOf(r, 'handler'), 'a command hook, timeout 10 s')
     assert.equal(textOf(r, 'vetobench'), `found (vetobench ${VERSION})`)
     assert.equal(textOf(r, 'policy'), 'built-in (12 categories)')
     assert.match(r.text, /it does not start Claude Code/)
@@ -124,7 +127,7 @@ test('hook test: no settings file, a file that is not JSON, a BOM, an unknown ho
     assert.match(none.text, /hook test: 1 problem found\n/)
     assert.equal(levelOf(none, 'settings file'), 'fail')
     assert.match(textOf(none, 'settings file'), /no settings file there; run vetobench hook install/)
-    assert.match(none.text, /need a vetobench hook in this file, so they did not run/)
+    assert.match(none.text, /need a vetobench hook, so they did not run/)
     assert.equal(levelOf(none, 'node'), '', 'the command checks are skipped')
 
     write(t.file, `{\n  // ${LEAK}\n  "model": "x"\n}\n`)
@@ -174,8 +177,20 @@ test('hook test: no vetobench hook, a matcher that misses Bash or is invalid, an
     const dup = await check(t)
     assert.equal(dup.code, 0, dup.text)
     assert.equal(levelOf(dup, 'installed'), 'warn')
-    assert.match(textOf(dup, 'installed'), /^3 vetobench hooks \(the checks below test the first\), matcher covers Bash; identical ones run once/)
+    assert.match(textOf(dup, 'installed'), /^3 vetobench hooks \(the checks below test the first whose matcher covers Bash\); identical ones run once/)
     assert.match(dup.text, /the hook is ready, 1 warning\n/)
+
+    // The checks test the first handler whose matcher covers Bash: here the second, whose node is gone.
+    write(t.file, { hooks: { PreToolUse: [group(hookCommandLine({ node: t.node, bin: t.bin }), 'Edit'),
+      group(hookCommandLine({ node: join(t.dir, `gone ${LEAK}`), bin: t.bin }), 'Bash')] } })
+    const second = await check(t)
+    assert.equal(levelOf(second, 'installed'), 'warn')
+    assert.equal(levelOf(second, 'node'), 'fail', 'the Bash one was tested')
+    // Only when no matcher covers Bash does the matcher fail.
+    write(t.file, { hooks: { PreToolUse: [group(hookCommandLine({ node: t.node, bin: t.bin }), 'Edit'), group('npx vetobench hook run', 'Write')] } })
+    const neither = await check(t)
+    assert.equal(neither.code, 1)
+    assert.equal(textOf(neither, 'installed'), '2 vetobench hooks, and none of their matchers covers Bash, so they never run')
   } finally {
     cleanup(t)
   }
@@ -245,7 +260,7 @@ test('hook test: bare node and vetobench depend on PATH (warn), and fail when PA
   }
 })
 
-test('hook test: npx warns; options hook run does not take, and commands it cannot read, fail', async () => {
+test('hook test: npx warns; options hook run does not take fail; a command it cannot read is "could not check"', async () => {
   const t = layout()
   try {
     for (const command of ['npx vetobench hook run', 'npx -y vetobench hook run', 'npm exec vetobench hook run', 'bunx vetobench hook run']) {
@@ -263,20 +278,29 @@ test('hook test: npx warns; options hook run does not take, and commands it cann
     assert.equal(extra.code, 1)
     assert.match(textOf(extra, 'command shape'), /options it does not take, so it stays silent on every command/)
     assert.equal(levelOf(extra, 'asks'), '', 'a hook that is always silent asks nothing')
+    assert.match(extra.text, /hook test: 1 problem found\n/)
+    assert.match(extra.text, REPAIR)
 
     for (const command of [`${sh(t.node)} "$HOME/${LEAK}/vetobench.js" hook run`, hookCommandLine({ node: t.node, bin: t.bin }) + ' 2>/dev/null',
       `cd /tmp && ${sh(t.node)} ${sh(t.bin)} hook run`, `${sh(t.node)} '${LEAK} vetobench hook run`]) {
       write(t.file, settings(t, { command }))
       const r = await check(t)
       assert.equal(r.code, 1, command)
-      assert.match(textOf(r, 'command shape'), /not a command this check can read/, command)
+      assert.equal(levelOf(r, 'command shape'), 'skip', command)
+      assert.match(textOf(r, 'command shape'), /^could not check: .*probably edited by hand; the checks of its paths and policy were skipped$/)
+      assert.match(r.text, /hook test: could not check the hook\n/)
+      assert.doesNotMatch(r.text, /problem|To repair it/)
+      assert.equal(levelOf(r, 'node') + levelOf(r, 'policy') + levelOf(r, 'asks'), '', 'nothing after it was checked')
     }
+    // With a real problem as well, both are named.
+    write(t.file, settings(t, { command: hookCommandLine({ node: t.node, bin: t.bin }) + ' 2>/dev/null', disableAllHooks: true }))
+    assert.match((await check(t)).text, /hook test: 1 problem found; could not check the hook's command\n/)
   } finally {
     cleanup(t)
   }
 })
 
-test('hook test: the installed copy\'s version, when it differs from this one or cannot be read, is a note', async () => {
+test('hook test: the installed copy\'s version: too old fails, older warns, newer is a note, and only plain versions are printed', async () => {
   const t = layout()
   try {
     const other = fakePackage(t, { name: 'vetobench', version: '9.9.9' })
@@ -285,14 +309,65 @@ test('hook test: the installed copy\'s version, when it differs from this one or
     assert.equal(r.code, 0, r.text)
     assert.equal(textOf(r, 'vetobench'), 'found (vetobench 9.9.9)')
     assert.equal(levelOf(r, 'version'), 'note')
-    assert.equal(textOf(r, 'version'), `the installed hook runs vetobench 9.9.9; this check used ${VERSION}'s policy matcher`)
+    assert.equal(textOf(r, 'version'), `the installed hook runs vetobench 9.9.9, newer than this copy (${VERSION}): the asks and stays silent checks ` +
+      "used this copy's matcher")
 
-    for (const pkg of [{ name: 'other', version: '1.0.0' }, { name: 'vetobench', version: `1.0.0 ${LEAK}` }, { name: 'vetobench' }]) {
+    // Against a newer running copy (injected), an older installed one warns, and one from before `hook` existed fails.
+    const as = (v) => hookCommand(['test'], { version: v, home: t.home, cwd: t.work, env: t.env, managed: t.managed })
+    for (const [installed, running, level, text] of [
+      ['0.2.0', '0.3.1', 'warn', /^the installed hook runs vetobench 0\.2\.0, older than this copy \(0\.3\.1\): .*, not the installed one$/],
+      ['0.3.0-rc.1', '0.3.0', 'warn', /older than this copy/], ['0.2.0-beta.2', '0.2.0-beta.10', 'warn', /older than this copy/],
+      ['0.3.0', '0.3.0-rc.2', 'note', /newer than this copy/], ['0.3.0', '0.3.0', '', null],
+      ['0.1.0', '0.2.0', 'fail', /^the installed hook runs vetobench 0\.1\.0, which has no hook command: .*Update it with npm install -g vetobench$/],
+      ['0.1.9-rc.1', '0.3.0', 'fail', /no hook command/]]) {
+      fakePackage(t, { name: 'vetobench', version: installed })
+      const v = await as(running)
+      const got = rows(v.text)
+      assert.equal(got.filter((x) => x[1] === 'version').map((x) => x[0]).join(','), level, `${installed} vs ${running}`)
+      if (text) assert.match(got.find((x) => x[1] === 'version')[2], text)
+      assert.equal(v.code, level === 'fail' ? 1 : 0)
+      if (level === 'fail') assert.match(v.text, REPAIR)
+      noLeaks(v.text, t)
+    }
+
+    for (const [pkg, shown, note] of [[{ name: 'other', version: '1.0.0' }, 'found', /version could not be read/],
+      [{ name: 'vetobench' }, 'found (an unrecognised version)', /runs an unrecognised version of vetobench/],
+      [{ name: 'vetobench', version: `1.0.0 ${LEAK}` }, 'found (an unrecognised version)', /unrecognised/],
+      [{ name: 'vetobench', version: '1.0.0-dev.1' }, 'found (an unrecognised version)', /unrecognised/],
+      [{ name: 'vetobench', version: '1.0.0+build.5' }, 'found (an unrecognised version)', /unrecognised/]]) {
       fakePackage(t, pkg)
       const u = await check(t)
-      assert.equal(textOf(u, 'vetobench'), 'found')
-      assert.match(textOf(u, 'version'), /version could not be read/)
+      assert.equal(textOf(u, 'vetobench'), shown)
+      assert.equal(levelOf(u, 'version'), 'note')
+      assert.match(textOf(u, 'version'), note)
+      assert.doesNotMatch(u.text, /dev\.1|build\.5|1\.0\.0/)
     }
+  } finally {
+    cleanup(t)
+  }
+})
+
+test('hook test: handler fields a hand edit may add: another type fails; async, if and a bad timeout warn', async () => {
+  const t = layout()
+  try {
+    const cmd = hookCommandLine({ node: t.node, bin: t.bin })
+    const withHandler = (extra) => ({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: cmd, timeout: 10, ...extra }] }] } })
+    for (const [extra, level, text] of [
+      [{ type: 'prompt' }, 'fail', /its type is not "command"/], [{ async: true }, 'warn', /runs in the background/],
+      [{ asyncRewake: true }, 'warn', /runs in the background/], [{ if: `Bash(${LEAK} *)` }, 'warn', /an "if" condition/],
+      [{ timeout: 0 }, 'warn', /not a positive number/], [{ timeout: -5 }, 'warn', /not a positive number/],
+      [{ timeout: '10' }, 'warn', /not a positive number/], [{ timeout: undefined }, 'ok', /^a command hook, Claude Code's default timeout$/],
+      [{ onFailure: 'block' }, 'note', /onFailure "block"/]]) {
+      write(t.file, withHandler(extra))
+      const r = await check(t)
+      assert.equal(levelOf(r, 'handler'), level, JSON.stringify(extra))
+      assert.match(textOf(r, 'handler'), text)
+      assert.equal(r.code, level === 'fail' ? 1 : 0, JSON.stringify(extra))
+    }
+    // With onFailure "block", a hook that cannot start blocks every command instead of letting it through.
+    write(t.file, { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', onFailure: 'block',
+      command: hookCommandLine({ node: join(t.dir, `gone ${LEAK}`), bin: t.bin }) }] }] } })
+    assert.match(textOf(await check(t), 'node'), /^missing: .*Claude Code then blocks every shell command$/)
   } finally {
     cleanup(t)
   }
@@ -365,11 +440,7 @@ test('hook test: disableAllHooks and allowManagedHooksOnly turn the hook off, by
     write(join(t.managed, 'managed-settings.json'), { allowManagedHooksOnly: true })
     const only = await check(t)
     assert.equal(only.code, 1)
-    assert.match(textOf(only, 'hooks enabled'), /allow only their own hooks \(allowManagedHooksOnly\), so this one never runs/)
-    write(join(t.managed, 'managed-settings.json'), { allowManagedHooksOnly: true, hooks: settings(t).hooks })
-    const there = await check(t)
-    assert.equal(there.code, 0, there.text)
-    assert.equal(levelOf(there, 'hooks enabled'), 'note')
+    assert.match(textOf(only, 'hooks enabled'), /allow only their own hooks \(allowManagedHooksOnly\), so a vetobench hook here never runs/)
 
     write(join(t.managed, 'managed-settings.json'), `{ ${LEAK}`)
     write(join(t.managed, 'managed-settings.d', '10-off.json'), { disableAllHooks: true })
@@ -377,6 +448,76 @@ test('hook test: disableAllHooks and allowManagedHooksOnly turn the hook off, by
     assert.equal(drop.code, 1)
     assert.equal(textOf(drop, 'hooks enabled'), 'turned off by disableAllHooks in the managed settings | ' +
       '1 managed settings file(s) could not be read; they may turn hooks off')
+  } finally {
+    cleanup(t)
+  }
+})
+
+test('hook test: a managed vetobench hook is the one tested when managed settings allow only theirs, or this file has none', async () => {
+  const t = layout()
+  const managedFile = (value) => write(join(t.managed, 'managed-settings.json'), value)
+  try {
+    // allowManagedHooksOnly, a hook in both: this file's does not run (a warning), the managed one is checked.
+    write(t.file, settings(t))
+    managedFile({ allowManagedHooksOnly: true, hooks: settings(t).hooks })
+    const both = await check(t)
+    assert.equal(both.code, 0, both.text)
+    assert.match(both.text, /hook test: the hook is ready, 1 warning\n/)
+    assert.equal(levelOf(both, 'managed hook'), 'warn')
+    assert.equal(textOf(both, 'managed hook'), "the managed settings allow only their own hooks, so this file's do not run; the checks below test " +
+      'theirs: 1 vetobench hook, matcher covers Bash')
+    assert.equal(levelOf(both, 'hooks enabled'), 'ok')
+    assert.equal(levelOf(both, 'asks'), 'ok')
+
+    // The managed one is broken: a problem, and no advice to reinstall your own.
+    managedFile({ allowManagedHooksOnly: true, hooks: settings(t, { command: hookCommandLine({ node: join(t.dir, `gone ${LEAK}`), bin: t.bin }) }).hooks })
+    const broken = await check(t)
+    assert.equal(broken.code, 1)
+    assert.equal(levelOf(broken, 'node'), 'fail', 'the managed handler was tested, not this file\'s healthy one')
+    assert.match(broken.text, /The vetobench hook in the managed settings needs a repair: tell whoever deploys them\./)
+    assert.doesNotMatch(broken.text, /To repair it/)
+
+    // No allowManagedHooksOnly and no hook here (or no file at all): the managed one runs in every session.
+    rmSync(t.file)
+    managedFile({ hooks: settings(t).hooks })
+    const managedOnly = await check(t)
+    assert.equal(managedOnly.code, 0, managedOnly.text)
+    assert.equal(levelOf(managedOnly, 'settings file'), 'note')
+    assert.equal(textOf(managedOnly, 'settings file'), 'no settings file there', 'no advice to install a second hook')
+    assert.equal(levelOf(managedOnly, 'managed hook'), 'note')
+    assert.match(textOf(managedOnly, 'managed hook'), /^the managed settings hold one, which runs in every session; the checks below test theirs/)
+    write(t.file, { model: 'x' })
+    const none = await check(t)
+    assert.equal(levelOf(none, 'installed'), 'note')
+    assert.equal(textOf(none, 'installed'), 'no vetobench hook in this file')
+
+    // disableAllHooks outside managed settings does not turn a managed hook off; a managed one does.
+    write(t.file, { disableAllHooks: true })
+    assert.equal(textOf(await check(t), 'hooks enabled'), '2 settings file(s) read; none turns the managed hook off')
+    managedFile({ disableAllHooks: true, hooks: settings(t).hooks })
+    assert.equal(textOf(await check(t), 'hooks enabled'), 'turned off by disableAllHooks in the managed settings')
+  } finally {
+    cleanup(t)
+  }
+})
+
+test('hook test: when this file has no hook, it points to the other file that has one, never to a second install', async () => {
+  const t = layout()
+  try {
+    write(t.local, settings(t))
+    const global = await check(t)
+    assert.equal(global.code, 1)
+    assert.equal(textOf(global, 'settings file'), "no settings file there; there is one in this folder's personal settings: run vetobench hook test --project")
+    write(t.file, { model: 'x' })
+    assert.equal(textOf(await check(t), 'installed'), "no vetobench hook in this file; there is one in this folder's personal settings: run " +
+      'vetobench hook test --project')
+
+    rmSync(t.local)
+    write(t.file, settings(t))
+    const local = await check(t, ['--project'])
+    assert.equal(textOf(local, 'settings file'), 'no settings file there; there is one in your global settings: run vetobench hook test')
+    write(t.local, {})
+    assert.equal(textOf(await check(t, ['--project']), 'installed'), 'no vetobench hook in this file; there is one in your global settings: run vetobench hook test')
   } finally {
     cleanup(t)
   }
@@ -390,7 +531,12 @@ test('hook test: CLAUDE_CONFIG_DIR warns in global mode; a bypassPermissions or 
     const set = await check(t, [], { env: { ...t.env, CLAUDE_CONFIG_DIR: other } })
     assert.equal(set.code, 0, set.text)
     assert.equal(levelOf(set, 'config dir'), 'warn')
-    assert.match(textOf(set, 'config dir'), /CLAUDE_CONFIG_DIR is set: Claude Code reads its settings from there/)
+    assert.equal(textOf(set, 'config dir'), 'CLAUDE_CONFIG_DIR is set: Claude Code reads its user settings from there, not from ' +
+      '~/.claude/settings.json; the settings there hold no vetobench hook')
+    write(join(other, 'settings.json'), settings(t))
+    const there = await check(t, [], { env: { ...t.env, CLAUDE_CONFIG_DIR: other } })
+    assert.equal(levelOf(there, 'config dir'), 'warn')
+    assert.match(textOf(there, 'config dir'), /the settings there hold a vetobench hook, which this check did not test$/)
     assert.equal(levelOf(await check(t, [], { env: { ...t.env, CLAUDE_CONFIG_DIR: join(t.home, '.claude') } }), 'config dir'), '')
     assert.equal(levelOf(await check(t, [], { env: { ...t.env, CLAUDE_CONFIG_DIR: '' } }), 'config dir'), '')
     // The user settings Claude Code reads are then the ones in that folder.
@@ -410,6 +556,11 @@ test('hook test: CLAUDE_CONFIG_DIR warns in global mode; a bypassPermissions or 
     assert.match(textOf(await check(t), 'permission mode'), /dontAsk: the hook's asks become denials/)
     write(t.file, settings(t, { permissions: { defaultMode: 'acceptEdits' } }))
     assert.equal(levelOf(await check(t), 'permission mode'), '')
+    // bypassPermissions as a default takes effect only from user or managed settings; dontAsk from any file.
+    write(t.local, { permissions: { defaultMode: 'bypassPermissions' } })
+    assert.equal(levelOf(await check(t), 'permission mode'), '')
+    write(t.local, { permissions: { defaultMode: 'dontAsk' } })
+    assert.equal(levelOf(await check(t), 'permission mode'), 'note')
   } finally {
     cleanup(t)
   }
@@ -427,8 +578,9 @@ test('hook test --project reads this folder\'s settings.local.json, not the glob
     assert.deepEqual(r.rows.map((x) => x[0]), HEALTHY.map(() => 'ok'))
     const global = await check(t)
     assert.equal(global.code, 1, 'the global file does not exist')
-    assert.match(textOf(global, 'settings file'), /run vetobench hook install$/)
+    assert.match(textOf(global, 'settings file'), /run vetobench hook test --project$/)
     write(t.local, {})
+    assert.match(textOf(await check(t), 'settings file'), /no settings file there; run vetobench hook install$/)
     assert.match(textOf(await check(t, ['--project']), 'installed'), /run vetobench hook install --project$/)
     write(t.local, settings(t, { command: hookCommandLine({ node: join(t.dir, `gone ${LEAK}`), bin: t.bin }) }))
     assert.match((await check(t, ['--project'])).text, /`vetobench hook uninstall --write --project`, then `vetobench hook install --write --project`/)

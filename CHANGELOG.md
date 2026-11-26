@@ -8,7 +8,7 @@ Corrections to published numbers go here as **retractions**: the claim as publis
 
 ### Added
 
-- `vetobench hook test [--project]`: checks an installed hook end to end without starting Claude Code, and only reads. The settings file, the vetobench handler and its matcher, the command's shape, that its node and vetobench paths still exist (and which version it runs), that its policy file loads, that the policy asks before a made-up push to main and stays silent on a harmless command, and settings that stop hooks (`disableAllHooks` by precedence, managed `allowManagedHooksOnly`, `CLAUDE_CONFIG_DIR`), plus a note for a `bypassPermissions` or `dontAsk` default mode. Fixed labels only; exits 1 when a check fails. CI runs it with networking off, after the install and after the uninstall.
+- `vetobench hook test [--project]`: checks an installed hook end to end without starting Claude Code, and only reads. The settings file, the vetobench handler, its matcher and its fields, the command's shape, that its node and vetobench paths still exist, which version it runs (one without `hook` fails), that its policy file loads, that the policy asks before a made-up push to main and stays silent on a harmless command, and settings that stop hooks (`disableAllHooks` by precedence, managed `allowManagedHooksOnly`, `CLAUDE_CONFIG_DIR`), plus a note for a `bypassPermissions` or `dontAsk` default mode. When the managed settings' vetobench hook is the one that runs, it tests that one. Fixed labels only; exits 1 when a check fails or could not run. CI runs it with networking off, after the install and after the uninstall.
 
 ### Docs
 
