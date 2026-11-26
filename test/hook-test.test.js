@@ -10,6 +10,8 @@ import { hookCommand, hookCommandLine, parseHookCommand, shellWords } from '../s
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BIN = join(ROOT, 'bin', 'vetobench.js')
 const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
+/** Text as a literal inside a RegExp: every regex metacharacter escaped, backslash included. */
+const reEscape = (s) => String(s).replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&')
 const LEAK = 'zzleak'
 
 /**
@@ -96,7 +98,7 @@ test('hook test: a healthy install is ready (exit 0), every check ok, and nothin
     const r = await check(t)
     assert.deepEqual(snapshot(t.dir), before, 'hook test writes nothing')
     assert.equal(r.code, 0, r.text)
-    assert.match(r.text, new RegExp(`^vetobench ${VERSION.replace(/\./g, '\\.')} hook test: the hook is ready\n`))
+    assert.match(r.text, new RegExp(`^vetobench ${reEscape(VERSION)} hook test: the hook is ready\n`))
     assert.match(r.text, /Settings file: your global settings \(~\/\.claude\/settings\.json\)\./)
     assert.deepEqual(r.rows.map((x) => x.slice(0, 2)), HEALTHY.map((label) => ['ok', label]))
     assert.equal(textOf(r, 'installed'), '1 vetobench hook, matcher covers Bash')
@@ -245,7 +247,7 @@ test('hook test: bare node and vetobench depend on PATH (warn), and fail when PA
     assert.equal(levelOf(cmd, 'node'), 'warn')
     assert.match(textOf(cmd, 'node'), /^none named: vetobench finds node on this PATH/)
     assert.equal(levelOf(cmd, 'vetobench'), 'warn')
-    assert.match(textOf(cmd, 'vetobench'), new RegExp(`^found on this PATH.*\\(vetobench ${VERSION.replace(/\./g, '\\.')}\\)$`))
+    assert.match(textOf(cmd, 'vetobench'), new RegExp(`^found on this PATH.*\\(vetobench ${reEscape(VERSION)}\\)$`))
     const noBin = await check(t, [], { env: { PATH: join(t.dir, `empty ${LEAK}`) } })
     assert.equal(noBin.code, 1)
     assert.equal(levelOf(noBin, 'node'), 'fail')
