@@ -65,11 +65,17 @@ jobs:
           test ! -e "$RUNNER_TEMP/hk/.claude/settings.json"
           offline env HOME="$RUNNER_TEMP/hk" npm_config_prefix="$RUNNER_TEMP/prefix" node bin/vetobench.js hook install --write
           grep -q 'hook run' "$RUNNER_TEMP/hk/.claude/settings.json"
+          # hook test: the hook just installed must be ready (exit 0), and after uninstall it must fail (exit 1)
+          out=$(offline env HOME="$RUNNER_TEMP/hk" node bin/vetobench.js hook test)
+          printf '%s\n' "$out" | grep -qF 'hook test: the hook is ready'
           offline env HOME="$RUNNER_TEMP/hk" node bin/vetobench.js hook uninstall --write
           if grep -q 'hook run' "$RUNNER_TEMP/hk/.claude/settings.json"; then
             echo "::error::hook uninstall left the hook in place"
             exit 1
           fi
+          status=0
+          offline env HOME="$RUNNER_TEMP/hk" node bin/vetobench.js hook test || status=$?
+          test "$status" -eq 1
           # scrub --write on a throwaway copy of the secrets fixtures, aged past the open-session guard, with a
           # throwaway home for the backups; the committed fixtures must stay as they are
           cp -R test/fixtures/secrets "$RUNNER_TEMP/scrub"
