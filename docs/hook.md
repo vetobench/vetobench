@@ -75,6 +75,7 @@ Tested on 2026-11-26 with Claude Code 2.1.332. Headless `claude -p` runs, with t
 | No rule, plus a hook answering `"allow"` | Ran (why `vetobench hook` never answers `"allow"`) |
 | Allow-rule plus `"ask"` hook, in `bypassPermissions` mode | **Held**; the control without the hook ran in that mode |
 | Allow-rule plus `"ask"` hook, in `dontAsk` mode | Held |
+| Allow-rule plus `"ask"` hook, the command run inside a subagent (the `Agent` tool), in the foreground or in the background | **Held**: the hook runs for subagents' tool calls too; the control without the ask ran inside the subagent |
 
 - **Headless, "held" means denied.** Nobody can answer a prompt in `claude -p`, so the call is denied, and the agent sees the hook's reason (the category labels).
 - **Not seen in this test: the dialog itself.** A headless run cannot show one. Claude Code documents `"ask"` as prompting you to confirm. To see it on your machine: in an empty folder, put an allow-rule for `Bash(touch:*)` and a `PreToolUse` hook that prints the JSON above into `.claude/settings.json`, start `claude`, trust the folder, and ask it to run `touch marker`. A permission prompt should appear although the allow-rule matches.
