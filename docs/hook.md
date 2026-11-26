@@ -2,7 +2,7 @@
 
 ## What it does
 
-`vetobench replay` counts how often an "ask before production writes, CI triggers and pushes to main" policy would have asked. `vetobench hook` puts the same policy in front of your agent. It installs a Claude Code `PreToolUse` hook for the `Bash` tool. Before each shell command, the hook checks the command against the policy. When the policy would ask, Claude Code shows you a permission prompt, even for a command an allow-rule such as `git:*` would have let through. Every other command goes through your normal permissions, as before.
+`vetobench replay` counts how often an "ask before production writes, CI triggers and pushes to main" policy would have asked. `vetobench hook` puts the same policy in front of your agent. It installs a Claude Code `PreToolUse` hook for the `Bash` tool. Before each shell command, the hook checks the command against the policy. When the policy would ask, Claude Code holds the command for your confirmation, even when an allow-rule such as `git:*` would have let it through (tested, see [What was tested](#what-was-tested-in-claude-code)). Every other command goes through your normal permissions, as before.
 
 The categories, the parser and the policy file are the ones `replay` uses (see [METHODOLOGY.md](../METHODOLOGY.md#replay-vetobench-replay)), so a replay tells you how often the hook would have asked you over your own history.
 
@@ -60,7 +60,25 @@ Checked on 2026-11-25 in the official hooks reference, <https://code.claude.com/
 - **Registration.** Hooks live under `hooks.PreToolUse` as matcher groups, `{"matcher": "Bash", "hooks": [{"type": "command", "command": "…", "timeout": 10}]}`, in `~/.claude/settings.json`, a project's `.claude/settings.json` or its `.claude/settings.local.json`. `timeout` is in seconds (the default for command hooks is 600). Project hooks are read from the `.claude/` folder of the folder Claude Code started in, not from parent folders. Hooks that match the same call run in parallel. An identical handler in several files runs once. When hooks disagree, `deny` beats `defer`, which beats `ask`, which beats `allow`. Claude Code's file watcher normally picks up edits to hooks in settings files. `/hooks` lists the hooks in effect.
 - **Precedence over rules.** Deny and ask rules are still evaluated whatever a hook returns. `PreToolUse` hooks run before every tool call, whether or not it needs permission.
 
-The pages do not say, in so many words, that a hook's `"ask"` prompts when an allow-rule matches the same command, or how hooks behave in `bypassPermissions` or `dontAsk` mode. Check both on your own setup before you rely on them (see Limits).
+The pages do not say, in so many words, that a hook's `"ask"` wins over an allow-rule that matches the same command, or how hooks behave in `bypassPermissions` or `dontAsk` mode. So we tested it.
+
+### What was tested in Claude Code
+
+Tested on 2026-11-26 with Claude Code 2.1.332. Headless `claude -p` runs, with the settings passed through `--settings` and `--setting-sources local` so that no other settings applied. The hook was a stub that prints the same JSON as `vetobench hook run`. Each run asked the agent to `touch` a file in an empty folder; whether the file existed afterwards showed whether the command ran.
+
+| Settings | Result |
+|---|---|
+| No rule, no hook (control) | Held |
+| Allow-rule `Bash(touch:*)` | Ran |
+| The same allow-rule, plus the hook answering `"ask"` | **Held**: the hook's ask won over the allow-rule |
+| No rule, plus the hook answering `"ask"` | Held |
+| No rule, plus a hook answering `"allow"` | Ran (why `vetobench hook` never answers `"allow"`) |
+| Allow-rule plus `"ask"` hook, in `bypassPermissions` mode | **Held**; the control without the hook ran in that mode |
+| Allow-rule plus `"ask"` hook, in `dontAsk` mode | Held |
+
+- **Headless, "held" means denied.** Nobody can answer a prompt in `claude -p`, so the call is denied, and the agent sees the hook's reason (the category labels).
+- **Not seen in this test: the dialog itself.** A headless run cannot show one. Claude Code documents `"ask"` as prompting you to confirm. To see it on your machine: in an empty folder, put an allow-rule for `Bash(touch:*)` and a `PreToolUse` hook that prints the JSON above into `.claude/settings.json`, start `claude`, trust the folder, and ask it to run `touch marker`. A permission prompt should appear although the allow-rule matches.
+- **Untrusted folders.** In `claude -p`, allow-rules in a project's `.claude/settings.json` are ignored until the folder is trusted, while hooks in the same file still run.
 
 ### Install and uninstall
 
@@ -83,13 +101,13 @@ The hook runs before every shell command your agent runs, so each run should sta
 ## Limits
 
 - **Where Claude Code reads its settings.** `install` edits `~/.claude/settings.json` (or the project's `settings.local.json` with `--project`). If you run Claude Code with `CLAUDE_CONFIG_DIR` pointing elsewhere, it never reads that file, so the hook will not run. Managed settings with `disableAllHooks` or `allowManagedHooksOnly` also stop it from running; `install` still says it installed the hook, because it does not read managed settings.
-- **Headless runs.** In `claude -p` and other non-interactive runs there is nobody to answer the prompt; check what your setup does with an "ask" there before you rely on it.
+- **Headless runs.** In `claude -p` and other non-interactive runs there is nobody to answer the prompt, so an "ask" denies the command, and the agent sees the reason (tested, see above). In a CI job, that means the hook blocks the commands its policy covers.
 - **Uninstall tidies up.** Removing the hook also removes a `PreToolUse` list, and a `hooks` object, that end up empty, even if they were empty before you installed it.
 - **A failed write keeps its backup.** If `--write` backs a file up and then cannot write it (a read-only folder, for example), the file is unchanged and the backup folder stays in `~/.claude/vetobench-backups/`; delete it if you like.
 - **A heuristic, not a security boundary.** The hook reads command text. It does not run the command, follow aliases, functions or the scripts a command calls, or see what a program does once it runs. The [replay limits](../METHODOLOGY.md#replay-limits) apply as they are: a bare `git push` pushes the current branch, which the command does not show, so it is not asked. A determined or confused agent can write a command it does not recognise.
 - **Bash only.** File edits and MCP tools are not checked.
 - **It fails open.** A policy file that breaks after install (moved, deleted or edited into invalid JSON) switches the guard off silently. Re-run the `echo … | vetobench hook run` check after you change the policy.
-- **It can only add prompts.** The hook never answers `allow` or `deny`. Whether a prompt appears also depends on Claude Code: the documentation does not spell out how a hook's `"ask"` meets a matching allow-rule, or what happens in `bypassPermissions` and `dontAsk` modes. Try one known command in your own setup.
+- **It can only add prompts.** The hook never answers `allow` or `deny`. Whether a prompt appears also depends on Claude Code. In our test (one version, headless), neither a matching allow-rule nor `bypassPermissions` overrode its ask, and `dontAsk` turned it into a denial; the interactive dialog itself was not observed. Claude Code can change this in any release, so try one known command in your own setup.
 - **A moved install.** If you uninstall the global package, switch Node versions with nvm, or move the policy file, the stored paths stop working. The hook then fails with an error before each shell command, which Claude Code treats as non-blocking: the command runs, unchecked. Run `vetobench hook uninstall --write` and install again.
 - **Prompts you see too often stop being read.** Run `vetobench replay` with your policy first. Its asks-per-day line shows how often the hook would have asked you.
 - **Windows is untested.** The command is quoted for a POSIX shell.
