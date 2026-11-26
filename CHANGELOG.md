@@ -4,6 +4,12 @@ Notable changes to vetobench, newest first. Versions follow [Semantic Versioning
 
 Corrections to published numbers go here as **retractions**: the claim as published, the corrected number, why it was wrong, and the [CLAIMS.md](CLAIMS.md) line it affects. That line stays in CLAIMS.md, marked retracted, so the record stays complete.
 
+## Unreleased
+
+### Docs
+
+- `docs/hook.md`: tested how the hook's "ask" meets Claude Code's permissions (Claude Code 2.1.332, headless). A matching allow-rule did not override it, nor did `bypassPermissions`; `dontAsk` turns it into a denial. The interactive dialog itself was not observed. Replaces the "the documentation does not say" caveats.
+
 ## 0.2.0 (2026-11-25)
 
 ### Added
