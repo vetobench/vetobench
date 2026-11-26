@@ -510,7 +510,7 @@ function onPath(name, env, platform) {
 }
 
 /** The only version strings ever printed: anything else in a package.json is "an unrecognised version". */
-const VERSION_TEXT = /^\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)(?:\.\d+)?)?$/
+const VERSION_TEXT = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:-(?:alpha|beta|rc)(?:\.\d{1,4})?)?$/
 /** The first version with `vetobench hook`: an older one exits with an error on `hook run`. */
 const HOOK_SINCE = '0.2.0'
 const PRE = ['alpha', 'beta', 'rc']
@@ -580,14 +580,25 @@ function describeHandlers(list) {
     'identical ones run once, different ones each run: keep one' }
 }
 
+/** A timeout Claude Code can wait for: a number of seconds, 1 or more. Below that it cancels the hook, which then fails open. */
+const usableTimeout = (t) => typeof t === 'number' && Number.isFinite(t) && t >= 1
+/** The handler's timeout as text: its value only when it is a whole number of seconds from 1 to 3600. */
+const timeoutText = (t) => (t === undefined ? "Claude Code's default timeout" : Number.isInteger(t) && t >= 1 && t <= 3600 ? `timeout ${num(t)} s`
+  : 'an unusual timeout')
+
 /** Fields a hand edit may add to the handler (install writes only type, command and timeout): [level, text] pairs. */
 function handlerProblems(h) {
   if (h.type !== 'command') return [['fail', 'its type is not "command", so Claude Code does not run it as a shell command']]
   const out = []
+  if (h.args !== undefined) {
+    out.push(['fail', 'an args list: Claude Code then starts the command as one program, with no shell, so the quoted command cannot run'])
+  }
+  if (h.shell !== undefined) out.push(['warn', 'a shell setting: install writes the command for a POSIX shell'])
   if (h.async === true || h.asyncRewake === true) out.push(['warn', 'async: it runs in the background, so Claude Code does not wait for its ask'])
   if (h.if !== undefined) out.push(['warn', 'an "if" condition: it runs only for the calls that rule matches'])
-  if (h.timeout !== undefined && !(typeof h.timeout === 'number' && h.timeout > 0)) {
-    out.push(['warn', 'a timeout that is not a positive number of seconds'])
+  if (h.timeout !== undefined && !usableTimeout(h.timeout)) {
+    out.push(['warn', 'a timeout under 1 second or not a number: Claude Code cancels a hook that runs out of time, and a cancelled hook ' +
+      'does not block the command'])
   }
   if (h.onFailure === 'block') {
     out.push(['note', 'onFailure "block": when the hook fails or cannot start, Claude Code blocks the command instead of running it'])
@@ -696,8 +707,7 @@ export function testHook({ home, cwd, project = false, env = process.env, platfo
   if (target) {
     const h = target.handler
     const issues = handlerProblems(h)
-    const timeout = typeof h.timeout === 'number' ? `timeout ${num(h.timeout)} s` : "Claude Code's default timeout"
-    if (!issues.length) add('handler', 'ok', `a command hook, ${timeout}`)
+    if (!issues.length) add('handler', 'ok', `a command hook, ${timeoutText(h.timeout)}`)
     for (const [level, text] of issues) add('handler', level, text)
   }
 
@@ -753,9 +763,10 @@ export function testHook({ home, cwd, project = false, env = process.env, platfo
         if (!v) add('version', 'note', `the installed hook's version could not be read; ${used}`)
         else if (v.unrecognised) add('version', 'note', `the installed hook runs an unrecognised version of vetobench; ${used}`)
         else if (compareVersions(v.version, HOOK_SINCE, { core: true }) < 0) {
-          add('version', 'fail', `the installed hook runs vetobench ${v.version}, which has no hook command: ${failsOpen}. ` +
-            'Update it with npm install -g vetobench')
-        } else if (self && compareVersions(v.version, self) < 0) {
+          add('version', 'fail', `the installed hook runs vetobench ${v.version}, which has no hook command: ${failsOpen}`)
+        } else if (!self) {
+          add('version', 'note', `this copy's version is not a plain version, so the two could not be compared; ${used}`)
+        } else if (compareVersions(v.version, self) < 0) {
           add('version', 'warn', `the installed hook runs vetobench ${v.version}, older than this copy (${self}): ${used}, not the installed one`)
         } else if (self && compareVersions(v.version, self) > 0) {
           add('version', 'note', `the installed hook runs vetobench ${v.version}, newer than this copy (${self}): ${used}`)
@@ -952,9 +963,13 @@ export function renderHookTest(r, version) {
   if (r.skipped) lines.push('', "The checks of the hook's command, its paths and its policy need a vetobench hook, so they did not run.")
   // A moved install or options hook run does not take: a fresh install writes the command again. Not for a command
   // this check could not read (likely edited by hand), nor for the managed settings' hook, which is not yours to edit.
-  if (failed('command shape') || failed('node') || failed('vetobench') || failed('version')) {
-    lines.push('', r.managed ? 'The vetobench hook in the managed settings needs a repair: tell whoever deploys them.'
-      : `To repair it, run \`vetobench hook uninstall --write${flag}\`, then \`vetobench hook install --write${flag}\`.`)
+  // A copy too old to have `hook` is updated first: it could not install the hook again.
+  const broken = failed('command shape') || failed('node') || failed('vetobench')
+  if (r.managed && (broken || failed('version'))) lines.push('', 'The vetobench hook in the managed settings needs a repair: tell whoever deploys them.')
+  else if (failed('version')) {
+    lines.push('', 'Update the installed vetobench first, with `npm install -g vetobench`, then run `vetobench hook test' + `${flag}\` again.`)
+  } else if (broken) {
+    lines.push('', `To repair it, run \`vetobench hook uninstall --write${flag}\`, then \`vetobench hook install --write${flag}\`.`)
   }
   if (failed('policy')) lines.push('', 'To see what is wrong with the policy, run `vetobench replay --policy FILE` with its file.')
   lines.push('')

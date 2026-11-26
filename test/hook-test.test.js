@@ -318,29 +318,44 @@ test('hook test: the installed copy\'s version: too old fails, older warns, newe
       ['0.2.0', '0.3.1', 'warn', /^the installed hook runs vetobench 0\.2\.0, older than this copy \(0\.3\.1\): .*, not the installed one$/],
       ['0.3.0-rc.1', '0.3.0', 'warn', /older than this copy/], ['0.2.0-beta.2', '0.2.0-beta.10', 'warn', /older than this copy/],
       ['0.3.0', '0.3.0-rc.2', 'note', /newer than this copy/], ['0.3.0', '0.3.0', '', null],
-      ['0.1.0', '0.2.0', 'fail', /^the installed hook runs vetobench 0\.1\.0, which has no hook command: .*Update it with npm install -g vetobench$/],
-      ['0.1.9-rc.1', '0.3.0', 'fail', /no hook command/]]) {
+      ['0.1.0', '0.2.0', 'fail', /^the installed hook runs vetobench 0\.1\.0, which has no hook command: .*runs the command unchecked$/],
+      ['0.1.9-rc.1', '0.3.0', 'fail', /no hook command/],
+      // A running copy whose version is not a plain one: the versions cannot be compared, and the line says so.
+      ['0.2.0', '0.3.0-dev', 'note', /^this copy's version is not a plain version, so the two could not be compared; /]]) {
       fakePackage(t, { name: 'vetobench', version: installed })
       const v = await as(running)
       const got = rows(v.text)
       assert.equal(got.filter((x) => x[1] === 'version').map((x) => x[0]).join(','), level, `${installed} vs ${running}`)
       if (text) assert.match(got.find((x) => x[1] === 'version')[2], text)
       assert.equal(v.code, level === 'fail' ? 1 : 0)
-      if (level === 'fail') assert.match(v.text, REPAIR)
+      if (level === 'fail') {
+        // Too old to install the hook again: update first, and no uninstall/install advice.
+        assert.match(v.text, /Update the installed vetobench first, with `npm install -g vetobench`, then run `vetobench hook test` again\./)
+        assert.doesNotMatch(v.text, /To repair it/)
+      }
       noLeaks(v.text, t)
     }
+    // A version failure together with a moved node still gets only the update advice.
+    fakePackage(t, { name: 'vetobench', version: '0.1.0' })
+    write(t.file, settings(t, { command: hookCommandLine({ node: join(t.dir, `gone ${LEAK}`), bin: other }) }))
+    const both = await check(t)
+    assert.match(both.text, /Update the installed vetobench first/)
+    assert.doesNotMatch(both.text, /To repair it/)
+    write(t.file, settings(t, { command: hookCommandLine({ node: t.node, bin: other }) }))
 
     for (const [pkg, shown, note] of [[{ name: 'other', version: '1.0.0' }, 'found', /version could not be read/],
       [{ name: 'vetobench' }, 'found (an unrecognised version)', /runs an unrecognised version of vetobench/],
       [{ name: 'vetobench', version: `1.0.0 ${LEAK}` }, 'found (an unrecognised version)', /unrecognised/],
       [{ name: 'vetobench', version: '1.0.0-dev.1' }, 'found (an unrecognised version)', /unrecognised/],
-      [{ name: 'vetobench', version: '1.0.0+build.5' }, 'found (an unrecognised version)', /unrecognised/]]) {
+      [{ name: 'vetobench', version: '1.0.0+build.5' }, 'found (an unrecognised version)', /unrecognised/],
+      [{ name: 'vetobench', version: '12345.0.0' }, 'found (an unrecognised version)', /unrecognised/],
+      [{ name: 'vetobench', version: '1.0.0-rc.12345' }, 'found (an unrecognised version)', /unrecognised/]]) {
       fakePackage(t, pkg)
       const u = await check(t)
       assert.equal(textOf(u, 'vetobench'), shown)
       assert.equal(levelOf(u, 'version'), 'note')
       assert.match(textOf(u, 'version'), note)
-      assert.doesNotMatch(u.text, /dev\.1|build\.5|1\.0\.0/)
+      assert.doesNotMatch(u.text, /dev\.1|build\.5|1\.0\.0|12345/)
     }
   } finally {
     cleanup(t)
@@ -355,8 +370,13 @@ test('hook test: handler fields a hand edit may add: another type fails; async, 
     for (const [extra, level, text] of [
       [{ type: 'prompt' }, 'fail', /its type is not "command"/], [{ async: true }, 'warn', /runs in the background/],
       [{ asyncRewake: true }, 'warn', /runs in the background/], [{ if: `Bash(${LEAK} *)` }, 'warn', /an "if" condition/],
-      [{ timeout: 0 }, 'warn', /not a positive number/], [{ timeout: -5 }, 'warn', /not a positive number/],
-      [{ timeout: '10' }, 'warn', /not a positive number/], [{ timeout: undefined }, 'ok', /^a command hook, Claude Code's default timeout$/],
+      [{ timeout: 0 }, 'warn', /under 1 second or not a number/], [{ timeout: -5 }, 'warn', /under 1 second/],
+      [{ timeout: 0.5 }, 'warn', /under 1 second or not a number: Claude Code cancels a hook that runs out of time, and a cancelled hook does not block/],
+      [{ timeout: '10' }, 'warn', /not a number/], [{ timeout: undefined }, 'ok', /^a command hook, Claude Code's default timeout$/],
+      [{ timeout: 3600 }, 'ok', /^a command hook, timeout 3,600 s$/], [{ timeout: 1.5 }, 'ok', /^a command hook, an unusual timeout$/],
+      [{ timeout: 7200 }, 'ok', /^a command hook, an unusual timeout$/], [{ timeout: 1e308 }, 'ok', /^a command hook, an unusual timeout$/],
+      [{ args: ['hook', 'run'] }, 'fail', /an args list: .*with no shell, so the quoted command cannot run/],
+      [{ shell: 'powershell' }, 'warn', /a shell setting: install writes the command for a POSIX shell/],
       [{ onFailure: 'block' }, 'note', /onFailure "block"/]]) {
       write(t.file, withHandler(extra))
       const r = await check(t)
