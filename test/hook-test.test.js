@@ -426,8 +426,8 @@ test('hook test: a broken policy fails (the guard is off) without printing its p
 
     // An error in owners alone does not turn the guard off: hook run drops the owners and still asks (a warning).
     for (const [owners, why] of [[[{ owner: `${LEAK}=x`, hosts: ['db'] }], 'policy: owners[0].owner must be 1 to 40 characters'],
-      [[{ owner: 'data team', match: `(${LEAK}` }], 'policy: owners[0].match is not a valid regular expression'],
-      [[{ owner: 'data team', match: `(${LEAK}+)+$`, anywhere: true }], 'policy: owners[0].match could take very long on a crafted command']]) {
+      [[{ owner: 'data team', match: `(${LEAK}+)+$`, anywhere: true }], 'policy: owners[0].match is not taken in owners: use contains'],
+      [[{ owner: 'data team', contains: [`${LEAK}`.repeat(11)] }], 'policy: owners[0].contains takes at most 8 strings of 1 to 64 characters']]) {
       write(policy, { rules: [{ match: 'make\\s+release' }], owners })
       const r = await check(t)
       assert.equal(r.code, 0, why)

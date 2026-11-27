@@ -574,99 +574,69 @@ const DETECTORS = [
 const CMD_START = String.raw`(?:^|\n|[;&|(]|\$\()\s*(?:(?:do|then|else)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:(?:sudo|timeout\s+\d+[smh]?|command)\s+)?`
 const POLICY_FIELDS = ['disable', 'rules', 'ignore', 'localHosts', 'prodHosts', 'branches', 'remoteIsProd', 'unknownIsProd', 'owners']
 const RULE_FIELDS = ['category', 'match', 'flags', 'anywhere']
-const OWNER_FIELDS = ['owner', 'hosts', 'branches', 'categories', 'match', 'flags', 'anywhere']
-const OWNER_SELECTORS = ['hosts', 'branches', 'categories', 'match']
+const OWNER_FIELDS = ['owner', 'hosts', 'branches', 'categories', 'contains']
+const OWNER_SELECTORS = ['hosts', 'branches', 'categories', 'contains']
 /** An owner label: 1 to 40 ASCII letters, digits, spaces and . _ @ # / & + -, with no space at either end. It is printed
  * (in the prompt and by replay), so it can hold no quote, `=`, `:` or `$`, and nothing a command or a secret needs. */
 const OWNER_LABEL = /^(?=.{1,40}$)[A-Za-z0-9._@#/&+-](?:[A-Za-z0-9 ._@#/&+-]*[A-Za-z0-9._@#/&+-])?$/
 const OWNER_LABEL_TEXT = '1 to 40 characters: letters, digits, spaces (not at either end) and . _ @ # / & + -'
 
-// Owners' patterns run on text the agent writes, and a regular expression cannot be stopped once it runs (no vm or
-// worker here: they are off limits). These limits keep the time a label can take far below the hook's timeout, so a
-// label never costs the ask. They are counts, not a clock, so a replay gives the same owners on every machine.
+// Owners are matched on text the agent writes, and the hook has seconds before Claude Code gives up on it and runs the
+// command unchecked. So owner matching uses no regular expression: category names, plain substrings (String includes)
+// and `*` globs matched part by part, each linear in its input, with every input and list bounded below. A label then
+// never costs the ask, and a replay gives the same owners on every machine.
 /** Owners are looked up only for commands up to this many characters; a longer command's ask has no owner. */
 export const MAX_OWNER_COMMAND = 4096
-/** A host or branch longer than this is not compared with owners' patterns (a DNS name has at most 253). */
+/** A host or branch longer than this (a DNS name has at most 253), or on more than one line, is not compared. */
 const MAX_OWNER_TARGET = 255
-/** At most this many owners entries may have a match, at most this many `*` in one host or branch pattern, and at
- * most this many ways for one match to branch (the arities of its alternations times 2 for each `?`). */
-export const MAX_OWNER_MATCHES = 16
+/** At most this many owners entries; per entry, at most this many host and branch patterns together, each with at
+ * most this many `*`, and at most this many contains strings of at most this many characters. */
+export const MAX_OWNERS = 64
+const MAX_OWNER_PATTERNS = 16
 const MAX_OWNER_STARS = 2
-const MAX_OWNER_BRANCHING = 16
+const MAX_CONTAINS = 8
+const MAX_CONTAINS_LENGTH = 64
+
+const LINE_BREAKS = ['\n', '\r', ' ', ' ']
+/** A host or branch owners may compare: on one line (so a glob's `*` means what globRx's `.*` means) and not too long. */
+const comparable = (t) => t.length <= MAX_OWNER_TARGET && !LINE_BREAKS.some((c) => t.includes(c))
 
 /**
- * Why a match pattern could take very long on a crafted command, as fixed text, or null. Conservative: it refuses a
- * repeated group that holds a quantifier or |, more than one quantifier that repeats (*, +, {n,} or {n,m}), more than
- * MAX_OWNER_BRANCHING ways to branch, and back-references. Measured worst case of an accepted pattern on a command of
- * MAX_OWNER_COMMAND characters: about 0.1 s. The pattern has already compiled, so the syntax is valid.
+ * A `*` glob as a function, without a regular expression: the text before the first `*` must start the value, the text
+ * after the last must end it, and each part between must follow in order (the leftmost fit is always the right one).
+ * Linear in the value. Same answers as globRx(pattern) for a comparable value; ignoreCase compares in lowercase.
  */
-export function slowPattern(src) {
-  const stack = [{ inner: false, alts: 1 }]
-  let repeating = 0
-  let branching = 1
-  let atom = null // what a quantifier would apply to: a group frame, or 'char'
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i]
-    const top = stack[stack.length - 1]
-    let q = null // [min, max] of a quantifier
-    if (c === '\\') {
-      const n = src[i + 1] ?? ''
-      if (/[1-9]/.test(n) || (n === 'k' && src[i + 2] === '<')) return 'it uses a back-reference'
-      if (/[pPu]/.test(n) && src[i + 2] === '{') i = Math.max(i + 1, src.indexOf('}', i + 2))
-      else i += n === 'x' ? 3 : n === 'u' ? 5 : n === 'c' ? 2 : 1
-      atom = 'char'
-    } else if (c === '[') {
-      let j = i + 1 // in JavaScript `[]` is an empty class: a ']' right after '[' or '[^' ends it
-      if (src[j] === '^') j++
-      for (; j < src.length && src[j] !== ']'; j++) if (src[j] === '\\') j++
-      i = j
-      atom = 'char'
-    } else if (c === '(') {
-      const m = /^\((?:\?(?:<[=!]|<[^>]*>|[=!:]|[a-zA-Z-]+:))?/.exec(src.slice(i))
-      i += m[0].length - 1
-      stack.push({ inner: false, alts: 1 })
-      atom = null
-    } else if (c === ')') {
-      const g = stack.length > 1 ? stack.pop() : top
-      branching *= g.alts
-      g.inner ||= g.alts > 1 // its own | counts: (a|a)* is as slow as (a+)*
-      stack[stack.length - 1].inner ||= g.inner
-      atom = g
-    } else if (c === '|') {
-      top.alts += 1
-      atom = null
-    } else if (c === '*' || c === '+' || c === '?') q = [c === '+' ? 1 : 0, c === '?' ? 1 : Infinity]
-    else if (c === '{' && /^\{\d+(?:,\d*)?\}/.test(src.slice(i))) {
-      const [, lo, comma, hi] = /^\{(\d+)(,?)(\d*)\}/.exec(src.slice(i))
-      q = [Number(lo), !comma ? Number(lo) : hi === '' ? Infinity : Number(hi)]
-      i = src.indexOf('}', i)
-    } else atom = 'char'
-    if (!q) continue
-    if (src[i + 1] === '?') i++ // lazy
-    const [lo, hi] = q
-    if (hi >= 2 && atom && atom !== 'char' && atom.inner) return 'it repeats a group that holds a quantifier or |'
-    if (hi > lo && hi > 1) repeating += 1
-    else if (hi > lo) branching *= 2
-    top.inner = true
-    atom = null
+function globMatcher(pattern, ignoreCase) {
+  const parts = (ignoreCase ? pattern.toLowerCase() : pattern).split('*')
+  const first = parts[0]
+  const last = parts[parts.length - 1]
+  const middle = parts.slice(1, -1)
+  return (value) => {
+    const v = ignoreCase ? value.toLowerCase() : value
+    if (parts.length === 1) return v === first
+    if (v.length < first.length + last.length || !v.startsWith(first) || !v.endsWith(last)) return false
+    const end = v.length - last.length
+    let at = first.length
+    for (const part of middle) {
+      const k = v.indexOf(part, at)
+      if (k < 0 || k + part.length > end) return false
+      at = k + part.length
+    }
+    return true
   }
-  branching *= stack[0].alts
-  if (repeating > 1) return 'it has more than one *, + or {n,m}'
-  if (branching > MAX_OWNER_BRANCHING) return `it can branch more than ${MAX_OWNER_BRANCHING} ways (alternatives and ? multiplied)`
-  return null
 }
 
 const globRx = (s, flags) => new RegExp('^' + s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$', flags)
-/** Host and context patterns (localHosts, prodHosts, owners' hosts): `*` is a wildcard, case is ignored. */
+/** Host and context patterns (localHosts, prodHosts): `*` is a wildcard, case is ignored. */
 const hostPatterns = (list) => list.map((s) => globRx(s.toLowerCase(), 'i'))
-/** Branch patterns (branches, owners' branches): `*` is a wildcard, case counts. */
+/** Branch patterns (branches): `*` is a wildcard, case counts. */
 const branchPatterns = (list) => list.map((s) => globRx(s, ''))
 
 function regex(src, flags, where) {
   try { return new RegExp(src, flags) } catch { throw new Error(`policy: ${where} is not a valid regular expression`) }
 }
 
-/** The regular expression of a rule's or an owner's `match`, with its flags, anchored at a command start unless anywhere. */
+/** The regular expression of a rule's `match`, with its flags, anchored at a command start unless anywhere. */
 function matchRx(r, where) {
   const flags = r.flags ?? ''
   if (typeof flags !== 'string' || !/^[imsu]*$/.test(flags)) throw new Error(`policy: ${where}.flags may only use i, m, s and u`)
@@ -674,13 +644,20 @@ function matchRx(r, where) {
   return regex(r.anywhere ? r.match : `${CMD_START}(?:${r.match})`, flags, `${where}.match`)
 }
 
-/** Compile the owners list: { owner, hosts, branches, categories, rx }, a selector null when the entry leaves it out. */
+/**
+ * Compile the owners list: { owner, hosts, branches, categories, contains }, a selector null when the entry leaves it
+ * out. hosts and branches become globMatcher functions, contains lowercase strings: nothing here is a regular expression.
+ */
 function compileOwners(raw, names) {
   if (raw === undefined) return []
   if (!Array.isArray(raw)) throw new Error('policy: owners must be a list')
-  const owners = raw.map((o, i) => {
+  if (raw.length > MAX_OWNERS) throw new Error(`policy: owners may have at most ${MAX_OWNERS} entries`)
+  return raw.map((o, i) => {
     const at = `owners[${i}]`
     if (!o || typeof o !== 'object' || Array.isArray(o)) throw new Error(`policy: ${at} must be an object with an "owner" label`)
+    for (const k of ['match', 'flags', 'anywhere']) {
+      if (Object.hasOwn(o, k)) throw new Error(`policy: ${at}.${k} is not taken in owners: use contains (plain text, no regular expression)`)
+    }
     if (Object.keys(o).some((k) => !OWNER_FIELDS.includes(k))) throw new Error(`policy: ${at} has an unknown field (known: ${OWNER_FIELDS.join(', ')})`)
     if (typeof o.owner !== 'string' || !OWNER_LABEL.test(o.owner)) throw new Error(`policy: ${at}.owner must be ${OWNER_LABEL_TEXT}`)
     if (isSecretRule(o.owner)) throw new Error(`policy: ${at}.owner matches a known key or token shape; use a team or role name`)
@@ -700,15 +677,16 @@ function compileOwners(raw, names) {
     for (const [k, v] of [['hosts', hosts], ['branches', branches]]) {
       if (v?.some((x) => x.split('*').length - 1 > MAX_OWNER_STARS)) throw new Error(`policy: ${at}.${k} patterns may hold at most ${MAX_OWNER_STARS} *`)
     }
-    if (o.match === undefined && (o.flags !== undefined || o.anywhere !== undefined)) throw new Error(`policy: ${at}.flags and anywhere need a "match"`)
-    if (o.match !== undefined && (typeof o.match !== 'string' || !o.match)) throw new Error(`policy: ${at}.match must be a non-empty regular expression`)
-    const rx = o.match === undefined ? null : matchRx(o, at)
-    const slow = rx && slowPattern(o.match)
-    if (slow) throw new Error(`policy: ${at}.match could take very long on a crafted command: ${slow}`)
-    return { owner: o.owner, hosts: hosts && hostPatterns(hosts), branches: branches && branchPatterns(branches), categories, rx }
+    if ((hosts?.length ?? 0) + (branches?.length ?? 0) > MAX_OWNER_PATTERNS) {
+      throw new Error(`policy: ${at} may hold at most ${MAX_OWNER_PATTERNS} host and branch patterns together`)
+    }
+    const contains = list('contains')
+    if (contains && (contains.length > MAX_CONTAINS || contains.some((s) => s.length > MAX_CONTAINS_LENGTH))) {
+      throw new Error(`policy: ${at}.contains takes at most ${MAX_CONTAINS} strings of 1 to ${MAX_CONTAINS_LENGTH} characters`)
+    }
+    return { owner: o.owner, hosts: hosts && hosts.map((s) => globMatcher(s, true)), branches: branches && branches.map((s) => globMatcher(s, false)),
+      categories, contains: contains && contains.map((s) => s.toLowerCase()) }
   })
-  if (owners.filter((o) => o.rx).length > MAX_OWNER_MATCHES) throw new Error(`policy: owners may have at most ${MAX_OWNER_MATCHES} entries with a "match"`)
-  return owners
 }
 
 /**
@@ -761,8 +739,8 @@ export const DEFAULT_POLICY = compilePolicy({})
 
 // ---- Owners: whose system an ask is about ----
 
-/** A target that names a host or context; not one that is missing, a variable, a unix socket, or too long to compare. */
-const named = (t) => typeof t === 'string' && t !== '' && !/[$`]/.test(t) && !t.startsWith('/') && t.length <= MAX_OWNER_TARGET
+/** A target that names a host or context; not one that is missing, a variable, a unix socket, or not comparable. */
+const named = (t) => typeof t === 'string' && t !== '' && !t.includes('$') && !t.includes('`') && !t.startsWith('/') && comparable(t)
 
 /**
  * What an owner's hosts see of one simple command asked about in a category: the host it runs on over ssh, and the
@@ -773,12 +751,12 @@ function askHosts(name, s, p) {
   const out = []
   const host = (t) => {
     const h = named(t) ? hostOf(t) : ''
-    if (h) out.push(h)
+    if (h && comparable(h)) out.push(h)
   }
   host(s.host)
   if (name === 'copy-to-remote') host(copyDest(s))
   else if (name === 'remote-sql-write') host(sqlTarget(s))
-  else if (name === 'prod-api-write') out.push(...prodUrlHosts(s, p).filter((h) => h.length <= MAX_OWNER_TARGET))
+  else if (name === 'prod-api-write') out.push(...prodUrlHosts(s, p).filter(comparable))
   else if (name === 'k8s-write') {
     const c = kubeContext(s)
     if (named(c)) out.push(c.toLowerCase())
@@ -788,13 +766,18 @@ function askHosts(name, s, p) {
 
 /**
  * The first owners entry that selects an ask: its label, or null. An entry selects it when all of its selectors match:
- * match on the command text, and categories, hosts and branches on one category of the ask, the hosts and branches
- * that category's simple commands target. Each selector matches when any of its patterns does.
+ * contains on the command text (heredoc bodies cut out, in lowercase), and categories, hosts and branches on one
+ * category of the ask, the hosts and branches that category's simple commands target. Each selector matches when any
+ * of its entries does. No regular expression: includes, and globMatcher functions.
  */
 function ownerOf(owners, categories, found, text) {
-  const any = (values, patterns) => [...values].some((v) => patterns.some((rx) => rx.test(v)))
+  const any = (values, globs) => [...values].some((v) => globs.some((g) => g(v)))
+  let lower = null
   for (const o of owners) {
-    if (o.rx && !o.rx.test(text)) continue
+    if (o.contains) {
+      lower ??= text.toLowerCase()
+      if (!o.contains.some((c) => lower.includes(c))) continue
+    }
     const hit = categories.some((c) => {
       const f = found.get(c)
       return (!o.categories || o.categories.includes(c)) && (!o.hosts || any(f.hosts, o.hosts)) && (!o.branches || any(f.branches, o.branches))
@@ -822,7 +805,7 @@ export function askDecision(command, policy = DEFAULT_POLICY) {
       const f = at(name)
       if (!owners.length) break
       for (const h of askHosts(name, s, policy)) f.hosts.add(h)
-      if (name === 'push-to-main') for (const b of protectedPushes(s, policy)) if (b.length <= MAX_OWNER_TARGET) f.branches.add(b)
+      if (name === 'push-to-main') for (const b of protectedPushes(s, policy)) if (comparable(b)) f.branches.add(b)
     }
   }
   for (const r of policy.rules) if (r.rx.test(text)) at(r.category)

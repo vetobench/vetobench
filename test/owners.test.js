@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
-import { MAX_OWNER_COMMAND, MAX_OWNER_MATCHES, askCategories, askDecision, compilePolicy, replayCommand, scanReplay, slowPattern } from '../src/replay.js'
+import { MAX_OWNER_COMMAND, askCategories, askDecision, compilePolicy, replayCommand, scanReplay } from '../src/replay.js'
 import { hookDecision, runHook } from '../src/hook.js'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'replay')
@@ -36,17 +36,29 @@ test('owners: labels are short names; every bad entry is an error naming the fie
     [{ owners: ['hunter2'] }, /owners\[0\] must be an object with an "owner" label/],
     [{ owners: [{ owner: 'hunter2', host: ['x'] }] }, /owners\[0\] has an unknown field/],
     [{ owners: [{ hosts: ['hunter2.example'] }] }, /owners\[0\]\.owner must be/],
-    [{ owners: [{ owner: 'hunter2' }] }, /owners\[0\] needs at least one of hosts, branches, categories, match/],
+    [{ owners: [{ owner: 'hunter2' }] }, /owners\[0\] needs at least one of hosts, branches, categories, contains/],
     [{ owners: [{ owner: 'hunter2', categories: ['hunter2-cat'] }] }, /owners\[0\]\.categories takes category names/],
-    [{ owners: [{ owner: 'x', match: '(hunter2' }] }, /owners\[0\]\.match is not a valid regular expression/],
-    [{ owners: [{ owner: 'x', match: '' }] }, /owners\[0\]\.match must be a non-empty regular expression/],
-    [{ owners: [{ owner: 'x', match: 'hunter2', flags: 'g' }] }, /owners\[0\]\.flags may only use i, m, s and u/],
-    [{ owners: [{ owner: 'x', match: 'hunter2', anywhere: 'yes' }] }, /owners\[0\]\.anywhere must be true or false/],
-    [{ owners: [{ owner: 'x', hosts: ['hunter2'], flags: 'i' }] }, /owners\[0\]\.flags and anywhere need a "match"/],
+    // No regular expressions in owners: the rules' spellings point to contains.
+    [{ owners: [{ owner: 'x', match: '(hunter2+)+$', anywhere: true }] }, /owners\[0\]\.match is not taken in owners: use contains/],
+    [{ owners: [{ owner: 'x', contains: ['hunter2'], flags: 'i' }] }, /owners\[0\]\.flags is not taken in owners: use contains/],
+    [{ owners: [{ owner: 'x', contains: ['hunter2'], anywhere: true }] }, /owners\[0\]\.anywhere is not taken in owners: use contains/],
+    [{ owners: [{ owner: 'x', contains: [] }] }, /owners\[0\]\.contains must be a non-empty list of non-empty strings/],
+    [{ owners: [{ owner: 'x', contains: [''] }] }, /owners\[0\]\.contains must be a non-empty list/],
+    [{ owners: [{ owner: 'x', contains: 'hunter2' }] }, /owners\[0\]\.contains must be a non-empty list/],
+    [{ owners: [{ owner: 'x', contains: ['hunter2' + 'x'.repeat(58)] }] }, /owners\[0\]\.contains takes at most 8 strings of 1 to 64 characters/],
+    [{ owners: [{ owner: 'x', contains: Array.from({ length: 9 }, (_, i) => `hunter2-${i}`) }] }, /owners\[0\]\.contains takes at most 8 strings/],
     [{ owners: [{ owner: 'x', hosts: [] }] }, /owners\[0\]\.hosts must be a non-empty list of non-empty strings/],
     [{ owners: [{ owner: 'x', branches: 'hunter2' }] }, /owners\[0\]\.branches must be a non-empty list/],
     [{ owners: [{ owner: 'x', categories: [''] }] }, /owners\[0\]\.categories must be a non-empty list/],
+    [{ owners: [{ owner: 'x', hosts: ['*hunter2*a*'] }] }, /^policy: owners\[0\]\.hosts patterns may hold at most 2 \*$/],
+    [{ owners: [{ owner: 'x', branches: ['*/*/*'] }] }, /owners\[0\]\.branches patterns may hold at most 2 \*/],
+    [{ owners: [{ owner: 'x', hosts: Array(9).fill('hunter2'), branches: Array(8).fill('main') }] },
+      /owners\[0\] may hold at most 16 host and branch patterns together/],
+    [{ owners: Array.from({ length: 65 }, () => ({ owner: 'x', categories: ['custom'] })) }, /^policy: owners may have at most 64 entries$/],
   ]
+  // The limits themselves are accepted.
+  assert.equal(compilePolicy({ owners: Array.from({ length: 64 }, () => ({ owner: 'x', hosts: Array(8).fill('*.a.*'), branches: Array(8).fill('r/*'),
+    contains: Array(8).fill('y'.repeat(64)) })) }).owners.length, 64)
   // Labels: wrong type, empty, a space at either end, characters outside the set, non-ASCII, too long. The second entry
   // is the bad one, so the index is checked too.
   for (const v of [42, null, '', ' hunter2', 'hunter2 ', 'hunter2:x', 'hunter2=x', '"hunter2"', "hunter2's", 'hunter2$x', 'hunter2\nx',
@@ -89,11 +101,11 @@ test('owners: hosts select by the host or context an ask is about, with the loca
   assert.equal(owner('psql -h db.example.internal -c "DELETE FROM x"', star), 'anyone')
 })
 
-test('owners: branches select pushes by the protected branch pushed to; categories and match select as documented', () => {
+test('owners: branches select pushes by the protected branch pushed to; categories and contains select as documented', () => {
   const p = compilePolicy({ branches: ['main', 'release/*'], owners: [
     { owner: 'release manager', branches: ['release/*'] },
     { owner: 'platform on-call', categories: ['infra-apply', 'k8s-write'] },
-    { owner: 'data team', match: String.raw`(?:\S*/)?migrate\.sh\b` },
+    { owner: 'data team', contains: ['migrate.sh'] },
     { owner: 'trunk keeper', branches: ['main', 'feature/*'] },
   ], rules: [{ match: String.raw`(?:\S*/)?migrate\.sh\b` }] })
   assert.equal(owner('git push origin release/2026-11', p), 'release manager')
@@ -105,12 +117,15 @@ test('owners: branches select pushes by the protected branch pushed to; categori
   assert.equal(owner('terraform apply -auto-approve', p), 'platform on-call')
   assert.equal(owner('kubectl --context prod delete pod web-1', p), 'platform on-call')
   assert.equal(owner('./scripts/migrate.sh up', p), 'data team')
-  assert.equal(owner('cd app && FOO=1 migrate.sh up', p), 'data team', 'anchored at a command start, like rules')
-  // match is anchored at a command start unless anywhere; flags as for rules.
-  const anchored = compilePolicy({ owners: [{ owner: 'data team', match: 'jobs' }] })
-  assert.equal(owner('psql -c "TRUNCATE jobs"', anchored), null)
-  const anywhere = compilePolicy({ owners: [{ owner: 'data team', match: 'JOBS', anywhere: true, flags: 'i' }] })
-  assert.equal(owner('psql -c "TRUNCATE jobs"', anywhere), 'data team')
+  assert.equal(owner('cd app && FOO=1 migrate.sh up', p), 'data team')
+  // contains: plain text anywhere in the command, case ignored, heredoc bodies cut out (as rules see the command).
+  const jobs = compilePolicy({ owners: [{ owner: 'data team', contains: ['nothing-here', 'JOBS'] }] })
+  assert.equal(owner('psql -c "TRUNCATE jobs"', jobs), 'data team')
+  assert.equal(owner('psql -c "TRUNCATE users"', jobs), null)
+  assert.equal(owner("cat <<'EOF' > notes.md\njobs\nEOF\ngit push origin main", jobs), null, 'a heredoc body is data')
+  const special = compilePolicy({ owners: [{ owner: 'x', contains: ['(a+)+$', '.*'] }] })
+  assert.equal(owner('git push origin main # (a+)+$', special), 'x', 'no regular expression: the text as written')
+  assert.equal(owner('git push origin main # aaaa', special), null)
   // A PR merge names no branch it merges into, so branches cannot select it; categories can.
   assert.equal(owner('gh pr merge 12 --squash', compilePolicy({ owners: [{ owner: 'x', branches: ['*'] }] })), null)
   assert.equal(owner('gh pr merge 12 --squash', compilePolicy({ owners: [{ owner: 'x', categories: ['pr-merge'] }] })), 'x')
@@ -124,8 +139,8 @@ test('owners: every selector of an entry must match, on the same category; the f
     hosts: ['db.*'] }] })), null, 'categories alone match nothing here')
   // The database host belongs to the SQL ask, not to the apply: this entry does not select the command.
   assert.equal(owner(both, compilePolicy({ owners: [{ owner: 'x', categories: ['infra-apply'], hosts: ['db.*'] }] })), null)
-  assert.equal(owner(both, compilePolicy({ owners: [{ owner: 'x', categories: ['infra-apply'], match: 'terraform' }] })), 'x')
-  assert.equal(owner(both, compilePolicy({ owners: [{ owner: 'x', categories: ['infra-apply'], match: 'helm' }] })), null)
+  assert.equal(owner(both, compilePolicy({ owners: [{ owner: 'x', categories: ['infra-apply'], contains: ['terraform'] }] })), 'x')
+  assert.equal(owner(both, compilePolicy({ owners: [{ owner: 'x', categories: ['infra-apply'], contains: ['helm'] }] })), null)
 
   // First match in file order, whichever category each entry matches on.
   const a = { owner: 'platform on-call', categories: ['infra-apply'] }
@@ -137,7 +152,7 @@ test('owners: every selector of an entry must match, on the same category; the f
 })
 
 test('owners never create an ask: a command the policy lets run stays silent, whatever the owners say', async () => {
-  const owners = [{ owner: 'anyone', match: '.', anywhere: true }, { owner: 'hosts', hosts: ['*'] }, { owner: 'all', categories: ['custom', 'push-to-main'] },
+  const owners = [{ owner: 'anyone', contains: [' '] }, { owner: 'hosts', hosts: ['*'] }, { owner: 'all', categories: ['custom', 'push-to-main'] },
     { owner: 'branches', branches: ['*'] }]
   const p = compilePolicy({ owners })
   for (const cmd of ['ls -la', 'git push origin feature/login', "ssh app.example.internal 'tail -n 50 /var/log/app.log'", 'psql -h localhost -c "DROP DATABASE t"',
@@ -200,72 +215,96 @@ const ms = (fn) => {
   return [Number(process.hrtime.bigint() - t) / 1e6, v]
 }
 
-test('owners: a match that could backtrack for long on a crafted command is refused, with a fixed reason', () => {
-  for (const src of [String.raw`(?:\S*/)?migrate\.sh\b`, String.raw`deploy\.sh\s+prod\b`, 'make release', '.*!', String.raw`\p{L}+x`,
-    String.raw`[a-z]{3}-db`, '(?:ab){2,5}', String.raw`(?:deploy|release|migrate)\.sh\s+(?:prod|production)`, String.raw`x\u{1F600}?y`,
-    String.raw`a\x41{2}`, '[]a+', '(?<name>ab)c*', '(?<=a)b+', 'a{0,1}b{0,1}c*']) {
-    assert.equal(slowPattern(src), null, src)
-  }
-  for (const [src, why] of [['(a+)+$', /repeats a group/], ['(a*)*b', /repeats a group/], ['(a|a)*b', /repeats a group/],
-    [String.raw`(?:\w+\s?){2}`, /repeats a group/], ['((ab)+c)+', /repeats a group/], ['(?:(?:a|b))+', /repeats a group/],
-    ['.*.*z', /more than one/], [String.raw`\S+y\S+z`, /more than one/], ['a{1,9}b{2,}', /more than one/], ['(?=.*x).*y', /more than one/],
-    ['(a)\\1', /back-reference/], ['(?<n>a)\\k<n>', /back-reference/],
-    ['a?a?a?a?a?b', /branch more than 16/], ['(?:a|a)(?:a|a)(?:a|a)(?:a|a)(?:a|a)b', /branch more than 16/], ['[](a+)+', /repeats a group/]]) {
-    assert.match(slowPattern(src) ?? 'accepted', why, src)
-  }
-  // As a policy error: the field and index, the reason, never the pattern.
-  assert.throws(() => compilePolicy({ owners: [{ owner: 'x', categories: ['custom'] }, { owner: 'y', match: '(hunter2+)+$', anywhere: true }] }),
-    (e) => /^policy: owners\[1\]\.match could take very long on a crafted command: it repeats a group/.test(e.message) && !e.message.includes('hunter2'))
-  assert.throws(() => compilePolicy({ owners: [{ owner: 'x', hosts: ['*hunter2*a*'] }] }),
-    (e) => /^policy: owners\[0\]\.hosts patterns may hold at most 2 \*$/.test(e.message))
-  assert.throws(() => compilePolicy({ owners: [{ owner: 'x', branches: ['*/*/*'] }] }), /owners\[0\]\.branches patterns may hold at most 2/)
-  assert.equal(compilePolicy({ owners: [{ owner: 'x', hosts: ['*.prod.*'] }] }).owners.length, 1)
-  const many = Array.from({ length: MAX_OWNER_MATCHES + 1 }, (_, i) => ({ owner: `team ${i}`, match: `tool${i}` }))
-  assert.throws(() => compilePolicy({ owners: many }), /owners may have at most 16 entries with a "match"/)
-  assert.equal(compilePolicy({ owners: many.slice(1) }).owners.length, MAX_OWNER_MATCHES)
-})
+/** runHook with a policy file: [milliseconds, output]. */
+async function timedHook(policy, command) {
+  return withTemp(async (dir) => {
+    const file = join(dir, 'policy.json')
+    writeFileSync(file, JSON.stringify(policy))
+    const t = process.hrtime.bigint()
+    const out = await runHook(['--policy', file], { stdin: () => Readable.from([JSON.stringify(payload(command))]) })
+    return [Number(process.hrtime.bigint() - t) / 1e6, out]
+  })
+}
 
-test('owners: a label never costs the ask: a bad owners list is dropped by the hook, and accepted patterns stay fast', async () => {
-  // The reviewer's repro: the hook drops the owners (replay and install refuse the file) and asks at once, unlabelled.
-  const evil = { owners: [{ owner: 'x', match: '(a+)+$', anywhere: true }] }
-  assert.throws(() => compilePolicy(evil), /could take very long/)
-  assert.equal(compilePolicy(evil, { dropBadOwners: true }).owners.length, 0)
-  assert.throws(() => compilePolicy({ ...evil, prodHosts: 'x' }, { dropBadOwners: true }), /prodHosts must be a list/, 'other errors still fail')
+test('owners take no regular expression: the rules\' spellings are an error for replay, and the hook drops them and still asks', async () => {
+  // The reviewers' shapes, each a slow regular expression on a crafted command. In owners they are refused outright.
+  const shapes = ['(a+)+$', String.raw`(?:\u{1,})*z`, String.raw`(?:\p{1,})*z`, String.raw`(?:\x*)*z`, String.raw`(?:\u*)*z`, String.raw`(?:\x+)+z`,
+    String.raw`[\s\S]*zzz`, '.*zzz', String.raw`\s*zzz`, String.raw`\W*zzz`, '[^a-z]*zzz']
   await withTemp(async (dir) => {
     const file = join(dir, 'policy.json')
-    writeFileSync(file, JSON.stringify(evil))
-    const cmd = 'git push origin main # ' + 'a'.repeat(27) + '!'
-    const t0 = process.hrtime.bigint()
-    const out = await runHook(['--policy', file], { stdin: () => Readable.from([JSON.stringify(payload(cmd))]) })
-    assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 2000)
-    assert.equal(out, PUSH)
+    for (const match of shapes) {
+      writeFileSync(file, JSON.stringify({ owners: [{ owner: 'release manager', categories: ['custom'] }, { owner: 'x', match, anywhere: true, flags: 's' }] }))
+      await assert.rejects(replayCommand(['--policy', file], { version: '9.9.9', defaultDir: FIXTURES }),
+        (e) => e.message === 'policy: owners[1].match is not taken in owners: use contains (plain text, no regular expression)', match)
+    }
   })
-
-  // The worst accepted shapes, on crafted commands at the length cap, all owners entries tried: well under the hook's
-  // 10-second timeout (measured at about 0.1 s for each such entry).
-  const worst = ['(?:a|aa|aaa|aaaa)(?:a|aa|aaa|aaaa)a*!', '(?:a|a)(?:a|a)(?:a|a)(?:a|a)a*!', '.*!', String.raw`\s*!`, 'a?a?a?a?a*!']
-  const owners = worst.flatMap((match) => [{ owner: 'x', match, anywhere: true }, { owner: 'y', match }])
-  const p = compilePolicy({ owners, rules: [{ match: 'a', anywhere: true }] })
-  const texts = ['a'.repeat(MAX_OWNER_COMMAND), ';a'.repeat(MAX_OWNER_COMMAND / 2), ';' + ' '.repeat(MAX_OWNER_COMMAND - 2) + 'a',
-    'A=b a'.repeat(MAX_OWNER_COMMAND / 5)]
-  let total = 0
-  for (const text of texts) {
-    const [took, d] = ms(() => askDecision(text, p))
-    assert.deepEqual(d, { categories: ['custom'], owner: null })
-    total += took
+  for (const [match, command] of [['(a+)+$', 'git push origin main # ' + 'a'.repeat(27) + '!'], [String.raw`(?:\u{1,})*z`, 'u'.repeat(30) + '; git push origin main'],
+    [String.raw`\s*zzz`, '\n'.repeat(4070) + ' git push origin main']]) {
+    const [took, out] = await timedHook({ owners: [{ owner: 'x', match }] }, command)
+    assert.equal(out, PUSH, match)
+    assert.ok(took < 2000, `${match}: ${took.toFixed(0)} ms`)
   }
-  assert.ok(total < 4000, `${total.toFixed(0)} ms`) // about 0.4 s on a laptop; generous for slow CI runners
+  assert.equal(compilePolicy({ owners: [{ owner: 'x', match: 'y' }] }, { dropBadOwners: true }).owners.length, 0)
+  assert.throws(() => compilePolicy({ owners: [{ owner: 'x', match: 'y' }], prodHosts: 'x' }, { dropBadOwners: true }), /prodHosts must be a list/,
+    'other errors still fail')
+})
+
+test('owners: with every limit at its maximum, crafted commands get their answer well under a second', async () => {
+  const a = (n) => 'a'.repeat(n)
+  // Near misses: each holds a letter the crafted values never do, placed so the prefix and suffix checks pass and the
+  // search fails late. No entry matches, so every entry is tried on every command.
+  const globs = [`*q${a(100)}*`, `*${a(100)}q*`, `a*r${a(120)}*`, `*${a(100)}*s${a(100)}`, `a${a(50)}*t${a(150)}*`, '*a*q', `*${a(60)}*x${a(60)}`,
+    `*u${a(200)}*`, `*${a(110)}v*${a(110)}`, `${a(120)}*${a(120)}x`, `*${a(239)}w*`, `*y${a(239)}*`, `*${a(80)}*${a(80)}y`, `*z${a(150)}*`,
+    `${a(10)}*q${a(200)}*`, `*${a(120)}*${a(100)}`]
+  const contains = ['\n'.repeat(63) + 'x', ' '.repeat(63) + 'x', ';'.repeat(63) + 'x', a(63) + 'x', 'x' + a(63), '\n'.repeat(32) + ' git push x',
+    'b' + a(63), a(32) + 'b' + a(31)]
+  const owners = Array.from({ length: 64 }, (_, i) => [{ owner: `team ${i}`, hosts: globs }, { owner: `team ${i}`, branches: globs },
+    { owner: `team ${i}`, contains }, { owner: `team ${i}`, contains: contains.slice().reverse() }][i % 4])
+  const policy = { branches: ['*'], owners }
+  assert.equal(compilePolicy(policy).owners.length, 64)
+  const H = a(240)
+  const commands = [
+    '\n'.repeat(4070) + ' git push origin main', ';'.repeat(4070) + ' git push origin main', ' '.repeat(4070) + 'git push origin main',
+    a(4070) + '; git push origin main', ('A=b ' + a(30) + '; ').repeat(100) + 'git push origin main',
+    // Hundreds of distinct 242-character hosts and branches, made by expanding a variable.
+    `H=${H}; ` + Array.from({ length: 150 }, (_, i) => `ssh \${H}${i} 'sudo rm -rf x'`).join('; '),
+    `B=${H}; git push origin ` + Array.from({ length: 560 }, (_, i) => `\${B}${i}`).join(' '),
+  ].map((c) => c.slice(0, MAX_OWNER_COMMAND))
+  let worst = 0
+  for (const command of commands) {
+    const [took, out] = await timedHook(policy, command)
+    assert.ok(out.startsWith('{"hookSpecificOutput"') && !out.includes('owner:'), out)
+    worst = Math.max(worst, took)
+  }
+  assert.ok(worst < 2000, `${worst.toFixed(0)} ms`)
 
   // Over the cap, no owner is looked up, however the entries would match.
   const any = compilePolicy({ owners: [{ owner: 'release manager', categories: ['push-to-main'] }] })
   assert.equal(owner('git push origin main #' + ' '.repeat(MAX_OWNER_COMMAND - 22), any), 'release manager')
   assert.deepEqual(askDecision('git push origin main #' + ' '.repeat(MAX_OWNER_COMMAND - 21), any), { categories: ['push-to-main'], owner: null })
-  // Hosts and branches past 255 characters are not compared, so a long crafted host cannot slow a two-star pattern.
-  const star = compilePolicy({ branches: ['*'], owners: [{ owner: 'x', hosts: ['*a*b'] }, { owner: 'y', branches: ['*a*b'] }] })
-  const [took, d] = ms(() => askDecision(`ssh ${'a'.repeat(300)} 'sudo systemctl restart api'; git push origin ${'a'.repeat(300)}`, star))
-  assert.deepEqual(d, { categories: ['push-to-main', 'prod-host-write'], owner: null })
-  assert.ok(took < 500, `${took.toFixed(0)} ms`)
-  assert.equal(owner(`ssh ${'a'.repeat(200)}b 'sudo systemctl restart api'`, star), 'x')
+  // A host or branch past 255 characters, or on two lines, is not compared.
+  const star = compilePolicy({ branches: ['*'], owners: [{ owner: 'x', hosts: ['*a*'] }, { owner: 'y', branches: ['*a*'] }] })
+  assert.deepEqual(askDecision(`ssh ${a(300)} 'sudo systemctl restart api'; git push origin ${a(300)} "a\nb"`, star),
+    { categories: ['push-to-main', 'prod-host-write'], owner: null })
+  assert.equal(owner(`ssh ${a(200)}b 'sudo systemctl restart api'`, star), 'x')
+})
+
+test('owners: globMatcher gives the answers of the regular-expression globs it replaces', () => {
+  // Owners' hosts and branches match like localHosts, prodHosts and branches: compare with a replay policy's own fields.
+  const values = ['db.prod.example.internal', 'db', 'db.', '.db', 'release/2026-11', 'release/', 'main', 'mainline', 'a', '', 'aXbXc', 'ab', 'abab', 'aab']
+  for (const g of ['*', 'db', 'db.*', '*.internal', 'db.*.internal', '*prod*', 'release/*', 'main', '*a*b', 'a*b*c', '*b', 'a*', 'ab*ab', '**', 'a**b']) {
+    const asHost = compilePolicy({ owners: [{ owner: 'x', hosts: [g] }] }).owners[0].hosts[0]
+    const asBranch = compilePolicy({ owners: [{ owner: 'x', branches: [g] }] }).owners[0].branches[0]
+    const reHost = compilePolicy({ prodHosts: [g] }).prodHosts[0]
+    const reBranch = compilePolicy({ branches: [g] }).branches[0]
+    for (const v of values) {
+      assert.equal(asHost(v), reHost.test(v), `host ${g} on ${v}`)
+      assert.equal(asBranch(v), reBranch.test(v), `branch ${g} on ${v}`)
+    }
+  }
+  const upper = compilePolicy({ owners: [{ owner: 'x', hosts: ['DB.*'] }, { owner: 'y', branches: ['Release/*'] }] }).owners
+  assert.equal(upper[0].hosts[0]('db.example'), true, 'hosts ignore case')
+  assert.equal(upper[1].branches[0]('release/1'), false, 'branches do not')
 })
 
 // The replay output of 0.3.0 for the fixture, before owners existed: policies without owners must print exactly this.
@@ -379,7 +418,7 @@ test('replay and hook with owners: no command, host, branch, rule or path is pri
       owners: [
         { owner: 'data team', hosts: [`db.${M}.example`] },
         { owner: 'release manager', branches: [`${M}/*`] },
-        { owner: 'data team', match: `(?:\\S*/)?${M}-migrate` },
+        { owner: 'data team', contains: [`${M}-MIGRATE`] },
         { owner: 'platform on-call', hosts: [`${M}-*`, `box.${M}.example`] },
         { owner: 'api team', categories: ['prod-api-write'], hosts: [`api.${M}.example`] },
       ] }
