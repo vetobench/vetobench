@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
-import { CATEGORIES, MAX_DELIMITER, MAX_DEPTH, MAX_EXPANSION, MAX_HEREDOCS, MAX_PARSED, MAX_PATTERN_TEXT, MAX_SEGMENTS, MAX_VARS,
+import { CATEGORIES, MAX_DELIMITER, MAX_DEPTH, MAX_EXPANSION, MAX_HEREDOCS, MAX_IGNORE_TEXT, MAX_PARSED, MAX_RULE_TEXT, MAX_SEGMENTS, MAX_VARS,
   MAX_WORD_EXPANSION, UNCHECKED, askCategories, askDecision, commandDecision, compilePolicy, heredocCuts, renderReplay, replayCommand,
   scanReplay, segments } from '../src/replay.js'
 import { REASON_PREFIX, hookDecision, runHook } from '../src/hook.js'
@@ -94,7 +94,7 @@ test('a value left out past a variable bound never lets the command pass silentl
   assert.deepEqual(askCategories(`${SPENT.slice(0, -'echo $P; '.length)}ls`), [])
 })
 
-test('the policy\'s own patterns run only on text up to MAX_PATTERN_TEXT: past it, rules are left out and ignore skips nothing', async () => {
+test('rules run only on text up to MAX_RULE_TEXT and ignore patterns on commands up to MAX_IGNORE_TEXT: past them, rules are left out and ignore skips nothing', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vetobench-limits-'))
   try {
     const write = (name, raw) => { const f = join(dir, name); writeFileSync(f, JSON.stringify(raw)); return f }
@@ -115,17 +115,33 @@ test('the policy\'s own patterns run only on text up to MAX_PATTERN_TEXT: past i
     assert.deepEqual(await run(' '.repeat(150000) + 'ls', spaces), ask(UNCHECKED))
     // NAME=value; repeated inside a comment, which the anchor retries from every `;`, even for a rule of plain text.
     assert.deepEqual(await run('# ' + 'A=1; '.repeat(40000) + '\nls', literal), ask(UNCHECKED))
+    // A rule that begins with .* behind every command start of a long run of `NAME=value;`: just over the bound, it is
+    // left out at once, and a built-in category still wins.
+    const dotStar = compilePolicy({ rules: [{ match: String.raw`.*tool0\s+deploy` }] })
+    const justOver = (head) => {
+      const cmd = head + ' # ' + 'A=1; '.repeat(Math.floor((MAX_RULE_TEXT - head.length - 3) / 5) + 1)
+      assert.ok(cmd.length > MAX_RULE_TEXT && cmd.length <= MAX_RULE_TEXT + 5, `${cmd.length}`)
+      return cmd
+    }
+    for (const [cmd, want] of [[justOver('git push origin main'), ['push-to-main']], [justOver('ls'), [UNCHECKED]]]) {
+      const [got, ms] = timed(() => askCategories(cmd, dotStar))
+      assert.deepEqual(got, want)
+      assert.ok(ms < 100, `${ms} ms`)
+    }
     // Under the bound, the rules run as before; without rules, a long command is checked as before.
     assert.deepEqual(await run('deploy.sh prod', literal), ask('custom'))
-    assert.deepEqual(askCategories(' '.repeat(MAX_PATTERN_TEXT + 1) + 'ls'), [])
+    const under = 'ls; '.repeat(Math.floor((MAX_RULE_TEXT - 14) / 4)) + 'deploy.sh prod'
+    assert.ok(under.length <= MAX_RULE_TEXT && under.length > MAX_RULE_TEXT - 4)
+    assert.deepEqual(askCategories(under, compilePolicy({ rules: [{ match: String.raw`deploy\.sh` }] })), ['custom'])
+    assert.deepEqual(askCategories(' '.repeat(MAX_IGNORE_TEXT + 1) + 'ls'), [])
     // Rules on the command with heredoc bodies cut out: a long body does not count.
-    const body = `cat > notes.md <<'EOF'\n${'x '.repeat(MAX_PATTERN_TEXT)}\nEOF\ndeploy.sh prod`
+    const body = `cat > notes.md <<'EOF'\n${'x '.repeat(MAX_IGNORE_TEXT)}\nEOF\ndeploy.sh prod`
     assert.deepEqual(askCategories(body, compilePolicy({ rules: [{ match: String.raw`deploy\.sh` }] })), ['custom'])
-    // Ignore patterns skip only commands up to the bound; a longer one is checked (and asked about if it asks).
+    // Ignore patterns skip only commands up to their bound; a longer one is checked (and asked about if it asks).
     const ignoring = compilePolicy({ ignore: ['zzskip'] })
-    assert.equal(commandDecision('git push origin main # zzskip', ignoring), null)
-    assert.deepEqual(commandDecision('git push origin main # zzskip' + ' '.repeat(MAX_PATTERN_TEXT), ignoring), { categories: ['push-to-main'], owner: null })
-    assert.deepEqual(commandDecision('ls # zzskip' + ' '.repeat(MAX_PATTERN_TEXT), ignoring), { categories: [], owner: null })
+    assert.equal(commandDecision('git push origin main # zzskip' + ' '.repeat(MAX_RULE_TEXT), ignoring), null)
+    assert.deepEqual(commandDecision('git push origin main # zzskip' + ' '.repeat(MAX_IGNORE_TEXT), ignoring), { categories: ['push-to-main'], owner: null })
+    assert.deepEqual(commandDecision('ls # zzskip' + ' '.repeat(MAX_IGNORE_TEXT), ignoring), { categories: [], owner: null })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -359,9 +375,11 @@ test('a rule that begins by matching whitespace no longer slows down on a run of
     assert.ok(ms < 1000, `${rule.match}: ${ms} ms`)
     assert.deepEqual(askCategories('ls\n\n\n  zzz', p), ['custom'], rule.match)
   }
-  // Any rule on assignments over many lines: their blanks no longer join the lines into one long try.
-  const [cats, ms] = timed(() => askCategories('A=1\n'.repeat(9000) + 'git push origin main', compilePolicy({ rules: [{ match: 'zzz' }] })))
-  assert.deepEqual(cats, ['push-to-main'])
+  // Any rule on assignments over many lines (within MAX_RULE_TEXT, so the rule runs): their blanks no longer join the
+  // lines into one long try.
+  const lines = 'A=1\n'.repeat(Math.floor((MAX_RULE_TEXT - 3) / 4)) + 'zzz'
+  const [cats, ms] = timed(() => askCategories(lines, compilePolicy({ rules: [{ match: 'zzz' }] })))
+  assert.deepEqual(cats, ['custom'])
   assert.ok(ms < 1000, `${ms} ms`)
 })
 

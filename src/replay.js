@@ -54,11 +54,14 @@ export const MAX_EXPANSION = 65536
 /** Variables tracked by one command line (and by each ssh remote command, which has its own): an assignment to a further
  * name is not recorded (incomplete), so references to it stay as written. */
 export const MAX_VARS = 256
-/** The policy's own regular expressions run only on text up to this many characters: rules on the command with heredoc
- * bodies cut out, ignore patterns on the whole command. Longer, rules are left out (incomplete) and ignore patterns
- * skip nothing. A regular expression cannot be stopped once it runs, and a simple one can still take a long time on a
- * long run of blanks or of `NAME=value;`. */
-export const MAX_PATTERN_TEXT = 32 * 1024
+/** The policy's own regular expressions run only on text up to a length, as one cannot be stopped once it runs, and a
+ * simple one can still take a long time on a long run of blanks or of `NAME=value;`. Rules, which the anchor puts behind
+ * every command start (a rule that begins with `.*` then costs about the cube of the length), run only on a command
+ * whose text with heredoc bodies cut out is at most MAX_RULE_TEXT characters; on a longer one they are left out
+ * (incomplete). Ignore patterns, tested as written, run only on commands of at most MAX_IGNORE_TEXT characters; a
+ * longer one is skipped by none. */
+export const MAX_RULE_TEXT = 4096
+export const MAX_IGNORE_TEXT = 32 * 1024
 
 /** Thrown when a command line goes past a limit that could hide a command from the detectors. */
 class ParseLimit extends Error {}
@@ -1006,12 +1009,12 @@ export function askDecision(command, policy = DEFAULT_POLICY) {
 
 /**
  * askDecision for a command the policy's ignore patterns may skip: null when one of them matches it. It never throws: an
- * ignore pattern that throws gives the UNCHECKED ask too. A command longer than MAX_PATTERN_TEXT is not tested against
+ * ignore pattern that throws gives the UNCHECKED ask too. A command longer than MAX_IGNORE_TEXT is not tested against
  * them, so none skips it.
  */
 export function commandDecision(command, policy = DEFAULT_POLICY) {
   try {
-    if (String(command ?? '').length <= MAX_PATTERN_TEXT && policy.ignore.some((rx) => rx.test(command))) return null
+    if (String(command ?? '').length <= MAX_IGNORE_TEXT && policy.ignore.some((rx) => rx.test(command))) return null
   } catch {
     return unchecked()
   }
@@ -1020,8 +1023,8 @@ export function commandDecision(command, policy = DEFAULT_POLICY) {
 
 function decide(command, policy) {
   const { text, segs, incomplete: partial } = parseCommand(command)
-  // The policy's rules run only on text up to MAX_PATTERN_TEXT characters; past it they are left out.
-  const rules = text.length <= MAX_PATTERN_TEXT ? policy.rules : []
+  // The policy's rules run only on text up to MAX_RULE_TEXT characters; past it they are left out.
+  const rules = text.length <= MAX_RULE_TEXT ? policy.rules : []
   const incomplete = partial || rules.length < policy.rules.length
   const owners = String(command ?? '').length <= MAX_OWNER_COMMAND ? policy.owners ?? [] : []
   // Per category hit: the hosts and protected branches its simple commands target (collected only for owners), at most
