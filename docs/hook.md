@@ -21,7 +21,7 @@ vetobench hook uninstall --write  # removes it again, after a backup
 |---|---|
 | `--write` | Apply the change. Without it, install and uninstall only show what would change. `test` does not take it: it never writes |
 | `--project` | Use this folder's `.claude/settings.local.json` (personal settings for this project, usually not committed) instead of `~/.claude/settings.json` |
-| `--policy FILE` | Your hosts, branches and extra rules, in the `replay` format. `install` checks that the file loads and stores its full path in the hook |
+| `--policy FILE` | Your hosts, branches, extra rules and owners, in the `replay` format. `install` checks that the file loads and stores its full path in the hook |
 
 To check a policy before you install it, replay it first: `vetobench replay --policy FILE`. To check the installed hook, run `vetobench hook test` (see [Checking the hook](#checking-the-hook-vetobench-hook-test)). To try the hook command by hand, pipe it a made-up tool call:
 
@@ -31,7 +31,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 It prints the "ask" answer. If it prints nothing for a command you expected it to ask about, the command does not match the policy or the policy file did not load.
 
-The output of `install`, `uninstall` and `test` holds fixed labels and counts only: how many other settings and hooks the file holds, how many vetobench hooks would be added or removed, how many rules and hosts your policy has, and for `test` a version string. It never shows a command, a path or a rule.
+The output of `install`, `uninstall` and `test` holds fixed labels and counts only: how many other settings and hooks the file holds, how many vetobench hooks would be added or removed, how many rules, hosts and owner entries your policy has, and for `test` a version string. It never shows a command, a path, a rule or an owner label.
 
 Exit codes: `install` and `uninstall` exit with 1 when they refuse (also in a dry run), or when `--write` leaves the file unchanged. `test` exits with 1 when any check fails or could not run. `hook run` always exits with 0.
 
@@ -47,9 +47,35 @@ Claude Code runs the hook before each `Bash` tool call and passes the call as JS
   {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"vetobench policy: Push to a main branch"}}
   ```
 
-  The reason holds only the fixed category labels (for example `Push to a main branch; Package publish`), never the command. Claude Code shows it to you in the permission prompt.
+  The reason holds the fixed category labels (for example `Push to a main branch; Package publish`) and, when your policy names an owner for the ask, that owner's label (see [Owners](#owners-who-to-ask)). Never the command, a host or a rule. Claude Code shows it to you in the permission prompt.
 - **Otherwise** it prints nothing and exits with 0, and the call goes through your normal permission flow. The hook never allows or denies anything by itself.
 - **It fails open.** On anything unexpected (input that is not JSON, a policy file that cannot be read or has an error, an unknown option, input over 8 MB, or input that has not ended after 5 seconds) it prints nothing and exits with 0. A broken hook then acts as no hook: it never blocks your agent, and never makes you approve every command. The cost is that a broken policy file turns the guard off without telling you, so `install` checks the policy before it writes, and `vetobench hook test` checks it again whenever you run it.
+
+### Owners: who to ask
+
+Approving every action one by one does not scale. What helps is knowing who owns what, so that a prompt says whose system the agent is about to change. The policy file's `owners` list does that, like a CODEOWNERS file for actions. The format is in [METHODOLOGY.md](../METHODOLOGY.md#owners-owners). For example:
+
+```json
+{
+  "branches": ["main", "release/*"],
+  "owners": [
+    { "owner": "data team", "categories": ["remote-sql-write"], "hosts": ["db.*.prod.example.internal"] },
+    { "owner": "platform on-call", "categories": ["infra-apply", "k8s-write", "prod-host-write"] },
+    { "owner": "release manager", "branches": ["main", "release/*"] }
+  ]
+}
+```
+
+With this file, an SQL write to `db.eu.prod.example.internal` is asked about with the reason:
+
+```text
+vetobench policy: SQL write to a non-local database (owner: data team)
+```
+
+- **Owners only label.** They never add an ask: the command must already be one the policy asks about. An ask no entry selects keeps the reason it has without owners (`vetobench policy: CI trigger or release`), byte for byte.
+- **One owner per ask.** The first entry, in file order, that selects the ask wins. When a command falls in several categories (`cd infra && terraform apply && git push origin HEAD:main`), the prompt lists every category and one owner: `vetobench policy: Push to a main branch; Infrastructure apply or destroy (owner: platform on-call)` with the file above, because the `platform on-call` entry comes before the `release manager` one.
+- **What a label may hold.** 1 to 40 ASCII letters, digits, spaces and `. _ @ # / & + -`, and nothing shaped like a key or token. The label is printed in the prompt, and Claude Code may keep the reason in its transcript, so the rule keeps commands and secrets out of both. A label outside it is a policy error, and the hook then fails open, like any other policy error: run `vetobench hook test` after you edit the file.
+- **Before you install,** `vetobench replay --policy FILE` shows how many asks each owner would have had over your own history, and how many had no owner.
 
 ### What was checked in Claude Code's documentation
 
@@ -118,7 +144,7 @@ It tests the vetobench hook that runs: the one in that file, or the one in the m
 | `node` | The node the command names | The path is gone or not executable: the hook then errors before each command, and Claude Code runs the command unchecked (or, with `onFailure: "block"`, blocks every shell command). A bare `node`, or none (vetobench started by its `#!` line), is a warning when it is on your `PATH`: the hook then depends on the `PATH` Claude Code gives hooks |
 | `vetobench` | The vetobench script the command names | It is gone, or not executable when the command runs it without node |
 | `version` | The `version` in the `package.json` of that script's package | Older than 0.2.0, which has no `hook` command: a fail, and the advice is to update the global install first (`npm install -g vetobench`), since that copy cannot install the hook again. Older than the copy running the check: a warning, because the `asks` and `stays silent` checks use the running copy's matcher, not the installed one. Newer, or unreadable, or a running copy whose own version is not a plain one (so the two cannot be compared): a note. Only a plain version (`1.2.3`, up to four digits per part, optionally `-alpha`, `-beta` or `-rc` with a number) is printed; anything else shows as "an unrecognised version" |
-| `policy` | The `--policy` file, loaded as `hook run` loads it | It does not load: the hook fails open, so the guard is off. Only the error's fixed text is printed (for example `rules[0].match is not a valid regular expression`) |
+| `policy` | The `--policy` file, loaded as `hook run` loads it. The line counts its categories, rules, host patterns and owner entries, never the labels | It does not load: the hook fails open, so the guard is off. Only the error's fixed text is printed (for example `rules[0].match is not a valid regular expression`) |
 | `asks` | The policy on a made-up `git push origin main` | The policy does not ask (a warning) |
 | `stays silent` | The policy on a made-up `ls -la` | The policy asks |
 | `hooks enabled` | Your user settings, this folder's `.claude/settings.json` and `.claude/settings.local.json`, and the managed settings files | `disableAllHooks` is true in the file that wins by precedence (managed, local, project, user; the output names only the scope; for a managed hook only managed settings count), or managed settings set `allowManagedHooksOnly` without holding a vetobench hook themselves. Managed files that cannot be read are a note |

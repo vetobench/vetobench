@@ -1,7 +1,8 @@
 // vetobench replay: would an "ask before production writes" policy have asked? Pure, local, zero-network.
 // Commands are parsed and matched in memory only. Nothing here returns, prints or stores a command, a host or a rule.
+// The one text from a policy file that is printed is an owner label, which compilePolicy restricts to a short name.
 import { readFileSync, existsSync } from 'node:fs'
-import { listTranscripts, jsonlLines, parseLine } from './analyze.js'
+import { listTranscripts, jsonlLines, parseLine, isSecretRule } from './analyze.js'
 
 /** Ask categories, in display order. The names are fixed: a policy file can switch them off or add rules to them, never rename them. */
 export const CATEGORIES = [
@@ -335,16 +336,17 @@ function prodContext(name, p) {
 
 const GIT_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path'])
 const PUSH_VALUED = new Set(['--repo', '-o', '--push-option', '--receive-pack', '--exec'])
-function pushToMain(s, p) {
-  if (s.prog !== 'git') return false
+/** The destination branches of a `git push`; [] for any other command. */
+function pushedBranches(s) {
+  if (s.prog !== 'git') return []
   const at = s.args.findIndex((a, i) => !a.startsWith('-') && !GIT_VALUED.has(s.args[i - 1]))
-  if (s.args[at] !== 'push') return false
+  if (s.args[at] !== 'push') return []
   // git push [remote] [refspec…]: a refspec's destination is after its last ':'; `src` alone pushes to the same name.
-  return positionals(s.args.slice(at + 1), PUSH_VALUED).slice(1).some((ref) => {
-    const dst = ref.replace(/^\+/, '').split(':').pop().replace(/^refs\/heads\//, '')
-    return p.branches.some((rx) => rx.test(dst))
-  })
+  return positionals(s.args.slice(at + 1), PUSH_VALUED).slice(1).map((ref) => ref.replace(/^\+/, '').split(':').pop().replace(/^refs\/heads\//, ''))
 }
+/** The pushed branches that match the policy's protected branches. */
+const protectedPushes = (s, p) => pushedBranches(s).filter((dst) => p.branches.some((rx) => rx.test(dst)))
+const pushToMain = (s, p) => protectedPushes(s, p).length > 0
 
 const GH_VALUED = new Set(['-R', '--repo'])
 const GH_API_VALUED = new Set(['-X', '--method', '-H', '--header', '-f', '-F', '--field', '--raw-field', '-q', '--jq', '-t',
@@ -427,14 +429,19 @@ const prodHostWrite = (s, p) => s.host !== null && prodHost(s.host, p) && hostWr
 const SCP_VALUED = new Set(['-c', '-D', '-F', '-i', '-J', '-l', '-o', '-P', '-S', '-X'])
 const RSYNC_VALUED = new Set(['-e', '--rsh', '-f', '--filter', '--exclude', '--include', '--rsync-path', '--port', '--chmod', '--chown'])
 const REMOTE_PATH = /^(?:[^@/\s]+@)?(\[[^\]]+\]|[A-Za-z0-9_.-]+):(?!\/\/)/
-/** scp or rsync whose destination (the last path) is host:path. Downloads (host:path first) are reads. */
-function copyToRemote(s, p) {
-  if (s.prog !== 'scp' && s.prog !== 'rsync') return false
+/** The host of an scp or rsync destination (the last path) when it is host:path, else null. Downloads (host:path first)
+ * are reads. */
+function copyDest(s) {
+  if (s.prog !== 'scp' && s.prog !== 'rsync') return null
   const pos = positionals(s.args, s.prog === 'scp' ? SCP_VALUED : RSYNC_VALUED)
-  if (pos.length < 2) return false
+  if (pos.length < 2) return null
   const dst = pos[pos.length - 1]
   const m = REMOTE_PATH.exec(dst) || /^rsync:\/\/(?:[^@/]+@)?([^/:]+)/.exec(dst)
-  return m !== null && prodHost(m[1], p)
+  return m === null ? null : m[1]
+}
+function copyToRemote(s, p) {
+  const host = copyDest(s)
+  return host !== null && prodHost(host, p)
 }
 
 const SQL_CLIENTS = new Map([['psql', 'PGHOST'], ['pg_restore', 'PGHOST'], ['dropdb', 'PGHOST'], ['mysql', 'MYSQL_HOST'], ['mariadb', 'MYSQL_HOST']])
@@ -455,12 +462,16 @@ function dbHost(s) {
   }
   return s.env[SQL_CLIENTS.get(s.prog)] ?? null
 }
+/** The database a SQL client writes to: its host, or over ssh the remote host when none or a local one is given ("local"
+ * then means the remote host's own database). */
+function sqlTarget(s) {
+  const h = dbHost(s)
+  return s.host !== null && (h === null || isLocalName(h)) ? s.host : h
+}
 function remoteSqlWrite(s, p) {
   if (!SQL_CLIENTS.has(s.prog)) return false
   if (!SQL_ALWAYS_WRITES.has(s.prog) && !SQL_WRITE.test(s.args.join(' ') + '\n' + (s.stdin ?? ''))) return false
-  const h = dbHost(s)
-  // Over ssh, "local" means the remote host's own database.
-  return prodHost(s.host !== null && (h === null || isLocalName(h)) ? s.host : h, p)
+  return prodHost(sqlTarget(s), p)
 }
 
 const KUBE_VALUED = new Set(['--context', '--namespace', '-n', '--kubeconfig', '--cluster', '--user', '-s', '--server', '--as',
@@ -469,14 +480,16 @@ const KUBE_VALUED = new Set(['--context', '--namespace', '-n', '--kubeconfig', '
 const KUBE_WRITES = new Set(['apply', 'create', 'delete', 'patch', 'replace', 'edit', 'scale', 'autoscale', 'set', 'label',
   'annotate', 'taint', 'drain', 'cordon', 'uncordon', 'expose', 'run'])
 const HELM_WRITES = new Set(['install', 'upgrade', 'uninstall', 'delete', 'rollback'])
+/** The Kubernetes context a kubectl, oc or helm command names; null when none. */
+const kubeContext = (s) => flagValue(s.args, s.prog === 'helm' ? '--kube-context' : '--context')
 function k8sWrite(s, p) {
   if (has(s.args, '--dry-run')) return false
   const [verb, sub] = positionals(s.args, KUBE_VALUED)
   if (s.prog === 'kubectl' || s.prog === 'oc') {
     const write = KUBE_WRITES.has(verb) || (verb === 'rollout' && ['restart', 'undo', 'pause', 'resume'].includes(sub))
-    return write && prodContext(flagValue(s.args, '--context'), p)
+    return write && prodContext(kubeContext(s), p)
   }
-  return s.prog === 'helm' && HELM_WRITES.has(verb) && prodContext(flagValue(s.args, '--kube-context'), p)
+  return s.prog === 'helm' && HELM_WRITES.has(verb) && prodContext(kubeContext(s), p)
 }
 
 const TF_WRITES = new Set(['apply', 'destroy', 'import', 'taint', 'untaint', 'force-unlock'])
@@ -536,13 +549,15 @@ function httpWrite(s) {
   if (/^(GET|HEAD|OPTIONS)$/i.test(pos[0] ?? '')) return false
   return WRITE_METHOD.test(pos[0] ?? '') || pos.slice(1).some((w) => /^[^=:\s]+:?=(?!=)/.test(w))
 }
+/** The hosts of an HTTP client's URLs that prodHosts lists. */
+const prodUrlHosts = (s, p) => s.args.flatMap((a) => {
+  const m = URL_HOST.exec(a)
+  return m === null ? [] : [hostOf(m[1])]
+}).filter((h) => p.prodHosts.some((rx) => rx.test(h)))
 /** Mutating HTTP request to a host listed in prodHosts. Off unless the policy names production hosts. */
 function prodApiWrite(s, p) {
   if (!p.prodHosts.length || !HTTP_CLIENTS.has(s.prog) || !httpWrite(s)) return false
-  return s.args.some((a) => {
-    const m = URL_HOST.exec(a)
-    return m !== null && p.prodHosts.some((rx) => rx.test(hostOf(m[1])))
-  })
+  return prodUrlHosts(s, p).length > 0
 }
 
 const DETECTORS = [
@@ -557,13 +572,61 @@ const DETECTORS = [
 /** Where a policy rule's `match` must start unless it says "anywhere": the start of a shell command (start of text or line,
  * or after ; & | ( or $( ), behind VAR=value prefixes, sudo, timeout or command. Same anchor as the research prototype. */
 const CMD_START = String.raw`(?:^|\n|[;&|(]|\$\()\s*(?:(?:do|then|else)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:(?:sudo|timeout\s+\d+[smh]?|command)\s+)?`
-const POLICY_FIELDS = ['disable', 'rules', 'ignore', 'localHosts', 'prodHosts', 'branches', 'remoteIsProd', 'unknownIsProd']
+const POLICY_FIELDS = ['disable', 'rules', 'ignore', 'localHosts', 'prodHosts', 'branches', 'remoteIsProd', 'unknownIsProd', 'owners']
 const RULE_FIELDS = ['category', 'match', 'flags', 'anywhere']
+const OWNER_FIELDS = ['owner', 'hosts', 'branches', 'categories', 'match', 'flags', 'anywhere']
+const OWNER_SELECTORS = ['hosts', 'branches', 'categories', 'match']
+/** An owner label: 1 to 40 ASCII letters, digits, spaces and . _ @ # / & + -, with no space at either end. It is printed
+ * (in the prompt and by replay), so it can hold no quote, `=`, `:` or `$`, and nothing a command or a secret needs. */
+const OWNER_LABEL = /^(?=.{1,40}$)[A-Za-z0-9._@#/&+-](?:[A-Za-z0-9 ._@#/&+-]*[A-Za-z0-9._@#/&+-])?$/
+const OWNER_LABEL_TEXT = '1 to 40 characters: letters, digits, spaces (not at either end) and . _ @ # / & + -'
 
 const globRx = (s, flags) => new RegExp('^' + s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$', flags)
+/** Host and context patterns (localHosts, prodHosts, owners' hosts): `*` is a wildcard, case is ignored. */
+const hostPatterns = (list) => list.map((s) => globRx(s.toLowerCase(), 'i'))
+/** Branch patterns (branches, owners' branches): `*` is a wildcard, case counts. */
+const branchPatterns = (list) => list.map((s) => globRx(s, ''))
 
 function regex(src, flags, where) {
   try { return new RegExp(src, flags) } catch { throw new Error(`policy: ${where} is not a valid regular expression`) }
+}
+
+/** The regular expression of a rule's or an owner's `match`, with its flags, anchored at a command start unless anywhere. */
+function matchRx(r, where) {
+  const flags = r.flags ?? ''
+  if (typeof flags !== 'string' || !/^[imsu]*$/.test(flags)) throw new Error(`policy: ${where}.flags may only use i, m, s and u`)
+  if (r.anywhere !== undefined && typeof r.anywhere !== 'boolean') throw new Error(`policy: ${where}.anywhere must be true or false`)
+  return regex(r.anywhere ? r.match : `${CMD_START}(?:${r.match})`, flags, `${where}.match`)
+}
+
+/** Compile the owners list: { owner, hosts, branches, categories, rx }, a selector null when the entry leaves it out. */
+function compileOwners(raw, names) {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw)) throw new Error('policy: owners must be a list')
+  return raw.map((o, i) => {
+    const at = `owners[${i}]`
+    if (!o || typeof o !== 'object' || Array.isArray(o)) throw new Error(`policy: ${at} must be an object with an "owner" label`)
+    if (Object.keys(o).some((k) => !OWNER_FIELDS.includes(k))) throw new Error(`policy: ${at} has an unknown field (known: ${OWNER_FIELDS.join(', ')})`)
+    if (typeof o.owner !== 'string' || !OWNER_LABEL.test(o.owner)) throw new Error(`policy: ${at}.owner must be ${OWNER_LABEL_TEXT}`)
+    if (isSecretRule(o.owner)) throw new Error(`policy: ${at}.owner has the shape of a secret (a key or token); use a team or role name`)
+    if (!OWNER_SELECTORS.some((k) => o[k] !== undefined)) throw new Error(`policy: ${at} needs at least one of ${OWNER_SELECTORS.join(', ')}`)
+    const list = (k) => {
+      const v = o[k]
+      if (v === undefined) return null
+      if (!Array.isArray(v) || !v.length || v.some((x) => typeof x !== 'string' || !x)) {
+        throw new Error(`policy: ${at}.${k} must be a non-empty list of non-empty strings`)
+      }
+      return v
+    }
+    const categories = list('categories')
+    if (categories?.some((c) => !names.includes(c))) throw new Error(`policy: ${at}.categories takes category names (${names.join(', ')})`)
+    const hosts = list('hosts')
+    const branches = list('branches')
+    if (o.match === undefined && (o.flags !== undefined || o.anywhere !== undefined)) throw new Error(`policy: ${at}.flags and anywhere need a "match"`)
+    if (o.match !== undefined && (typeof o.match !== 'string' || !o.match)) throw new Error(`policy: ${at}.match must be a non-empty regular expression`)
+    return { owner: o.owner, hosts: hosts && hostPatterns(hosts), branches: branches && branchPatterns(branches), categories,
+      rx: o.match === undefined ? null : matchRx(o, at) }
+  })
 }
 
 /** Compile a policy object (the parsed --policy file). Errors name the field, never its value. */
@@ -590,36 +653,98 @@ export function compilePolicy(raw = {}) {
     if (Object.keys(r).some((k) => !RULE_FIELDS.includes(k))) throw new Error(`policy: rules[${i}] has an unknown field (known: ${RULE_FIELDS.join(', ')})`)
     const category = r.category ?? 'custom'
     if (!names.includes(category)) throw new Error(`policy: rules[${i}].category must be one of: ${names.join(', ')}`)
-    const flags = r.flags ?? ''
-    if (typeof flags !== 'string' || !/^[imsu]*$/.test(flags)) throw new Error(`policy: rules[${i}].flags may only use i, m, s and u`)
-    if (r.anywhere !== undefined && typeof r.anywhere !== 'boolean') throw new Error(`policy: rules[${i}].anywhere must be true or false`)
-    return { category, rx: regex(r.anywhere ? r.match : `${CMD_START}(?:${r.match})`, flags, `rules[${i}].match`) }
+    return { category, rx: matchRx(r, `rules[${i}]`) }
   })
   const ignore = strings('ignore').map((s, i) => regex(s, '', `ignore[${i}]`))
-  const localHosts = strings('localHosts').map((s) => globRx(s.toLowerCase(), 'i'))
-  const prodHosts = strings('prodHosts').map((s) => globRx(s.toLowerCase(), 'i'))
-  const branches = strings('branches', ['main', 'master']).map((s) => globRx(s, ''))
+  const localHosts = hostPatterns(strings('localHosts'))
+  const prodHosts = hostPatterns(strings('prodHosts'))
+  const branches = branchPatterns(strings('branches', ['main', 'master']))
+  const owners = compileOwners(raw.owners, names)
   const detectors = DETECTORS.filter(([k]) => !disable.includes(k))
   return {
-    detectors, rules, ignore, localHosts, prodHosts, branches,
+    detectors, rules, ignore, localHosts, prodHosts, branches, owners,
     remoteIsProd: bool('remoteIsProd', true), unknownIsProd: bool('unknownIsProd', true),
-    // Counts and fixed names only: safe to print.
+    // Counts and fixed names only: safe to print. owners only when the policy has some, so other outputs stay as they were.
     summary: { categories: detectors.length, disabled: disable.filter((d, i) => disable.indexOf(d) === i), rules: rules.length,
       ignore: ignore.length, localHosts: localHosts.length, prodHosts: prodHosts.length, branches: branches.length,
-      remoteIsProd: bool('remoteIsProd', true), unknownIsProd: bool('unknownIsProd', true) },
+      remoteIsProd: bool('remoteIsProd', true), unknownIsProd: bool('unknownIsProd', true), ...(owners.length && { owners: owners.length }) },
   }
 }
 
 export const DEFAULT_POLICY = compilePolicy({})
 
-/** Categories one shell command would be asked about, in display order. Empty when the policy lets it run. */
-export function askCategories(command, policy = DEFAULT_POLICY) {
-  const { text, segs } = parseCommand(command)
-  const hit = new Set()
-  for (const [name, test] of policy.detectors) if (segs.some((s) => test(s, policy))) hit.add(name)
-  for (const r of policy.rules) if (r.rx.test(text)) hit.add(r.category)
-  return CATEGORIES.map(([k]) => k).filter((k) => hit.has(k))
+// ---- Owners: whose system an ask is about ----
+
+/** A target that names a host or context; not one that is missing, a variable or a unix socket. */
+const named = (t) => typeof t === 'string' && t !== '' && !/[$`]/.test(t) && !t.startsWith('/')
+
+/**
+ * What an owner's hosts see of one simple command asked about in a category: the host it runs on over ssh, and the
+ * category's own target (the copy destination, the database host, the Kubernetes context or the production API host).
+ * Lowercase; a target the command does not show is left out.
+ */
+function askHosts(name, s, p) {
+  const out = []
+  const host = (t) => {
+    const h = named(t) ? hostOf(t) : ''
+    if (h) out.push(h)
+  }
+  host(s.host)
+  if (name === 'copy-to-remote') host(copyDest(s))
+  else if (name === 'remote-sql-write') host(sqlTarget(s))
+  else if (name === 'prod-api-write') out.push(...prodUrlHosts(s, p))
+  else if (name === 'k8s-write') {
+    const c = kubeContext(s)
+    if (named(c)) out.push(c.toLowerCase())
+  }
+  return out
 }
+
+/**
+ * The first owners entry that selects an ask: its label, or null. An entry selects it when all of its selectors match:
+ * match on the command text, and categories, hosts and branches on one category of the ask, the hosts and branches
+ * that category's simple commands target. Each selector matches when any of its patterns does.
+ */
+function ownerOf(owners, categories, found, text) {
+  const any = (values, patterns) => [...values].some((v) => patterns.some((rx) => rx.test(v)))
+  for (const o of owners) {
+    if (o.rx && !o.rx.test(text)) continue
+    const hit = categories.some((c) => {
+      const f = found.get(c)
+      return (!o.categories || o.categories.includes(c)) && (!o.hosts || any(f.hosts, o.hosts)) && (!o.branches || any(f.branches, o.branches))
+    })
+    if (hit) return o.owner
+  }
+  return null
+}
+
+/**
+ * What the policy does with one shell command: { categories, owner }. categories are the ones it would be asked about,
+ * in display order, empty when the policy lets it run. owner is the label of the first owners entry that selects the
+ * ask, or null (always null without an ask: an owner never makes one).
+ */
+export function askDecision(command, policy = DEFAULT_POLICY) {
+  const { text, segs } = parseCommand(command)
+  const owners = policy.owners ?? []
+  // Per category hit: the hosts and protected branches its simple commands target (collected only for owners).
+  const found = new Map()
+  const at = (k) => found.get(k) ?? found.set(k, { hosts: new Set(), branches: new Set() }).get(k)
+  for (const [name, test] of policy.detectors) {
+    for (const s of segs) {
+      if (!test(s, policy)) continue
+      const f = at(name)
+      if (!owners.length) break
+      for (const h of askHosts(name, s, policy)) f.hosts.add(h)
+      if (name === 'push-to-main') for (const b of protectedPushes(s, policy)) f.branches.add(b)
+    }
+  }
+  for (const r of policy.rules) if (r.rx.test(text)) at(r.category)
+  const categories = CATEGORIES.map(([k]) => k).filter((k) => found.has(k))
+  return { categories, owner: owners.length && categories.length ? ownerOf(owners, categories, found, text) : null }
+}
+
+/** Categories one shell command would be asked about, in display order. Empty when the policy lets it run. */
+export const askCategories = (command, policy = DEFAULT_POLICY) => askDecision(command, policy).categories
 
 // ---- Labels: your own verdict per tool call, "ask" (it should have asked) or "allow" ----
 
@@ -654,6 +779,8 @@ export async function scanReplay(dir, { since = null, until = null, policy = DEF
   const t = { files: 0, unreadable: 0, commands: 0, asks: 0, byCategory: {}, repeated: { commands: 0, asks: 0 }, ignored: 0, firstTs: null, lastTs: null,
     asksByDay: {} }
   const lab = labels ? { entries: labels.size, matched: 0, right: 0, wrong: 0, unlabelled: 0, missed: 0 } : null
+  // Asks per owner label, in the order the policy first names each; only for a policy with owners.
+  const own = policy.owners?.length ? { byOwner: new Map(policy.owners.map((o) => [o.owner, 0])), without: 0 } : null
   const seen = new Map()
   for (const f of listTranscripts(dir)) {
     t.files += 1
@@ -685,12 +812,14 @@ export async function scanReplay(dir, { since = null, until = null, policy = DEF
             if (!t.firstTs || day < t.firstTs) t.firstTs = day
             if (!t.lastTs || day > t.lastTs) t.lastTs = day
           }
-          const hits = askCategories(cmd, policy)
+          const { categories: hits, owner } = askDecision(cmd, policy)
           for (const h of hits) t.byCategory[h] = (t.byCategory[h] || 0) + 1
           const asked = hits.length > 0
           if (asked) {
             t.asks += 1
             if (/^\d{4}-\d{2}-\d{2}$/.test(day)) t.asksByDay[day] = (t.asksByDay[day] || 0) + 1
+            if (own && owner === null) own.without += 1
+            else if (own) own.byOwner.set(owner, own.byOwner.get(owner) + 1)
           }
           if (id) seen.set(id, asked)
           if (!lab) continue
@@ -708,6 +837,8 @@ export async function scanReplay(dir, { since = null, until = null, policy = DEF
     }
   }
   if (lab) t.labels = lab
+  // A list, not an object: an owner label of digits would otherwise move to the front.
+  if (own) t.owners = { byOwner: [...own.byOwner].map(([owner, asks]) => ({ owner, asks })), without: own.without }
   return t
 }
 
@@ -737,7 +868,7 @@ Usage: ${REPLAY_USAGE}
 
   transcripts-dir   default: ~/.claude/projects
   --since / --until window by UTC day of the tool call (until is exclusive)
-  --policy file     your hosts, branches and extra rules (JSON; format in METHODOLOGY.md)
+  --policy file     your hosts, branches, extra rules and owners (JSON; format in METHODOLOGY.md)
   --labels file     your verdict per tool call id, "ask" or "allow", to count right and wrong asks
   --json            aggregates as JSON (safe to share: counts only)
 
@@ -784,7 +915,7 @@ export function renderReplay(t, policy, version, fromFile = false) {
   if (!fromFile) lines.push(`Policy: built-in (${s.categories} categories). Add your own hosts and rules with --policy <file>.`)
   else {
     lines.push(`Policy: ${s.categories} of ${DETECTORS.length} built-in categories, ${num(s.rules)} rule(s) of your own, ` +
-      `${num(s.localHosts)} local and ${num(s.prodHosts)} production host pattern(s)` +
+      `${num(s.localHosts)} local and ${num(s.prodHosts)} production host pattern(s)${s.owners ? `, ${num(s.owners)} owner(s)` : ''}` +
       `${s.remoteIsProd ? '' : ', only listed production hosts count'}${s.unknownIsProd ? '' : ', unknown hosts count as local'}.`)
   }
   lines.push('')
@@ -813,6 +944,14 @@ export function renderReplay(t, policy, version, fromFile = false) {
   if (t.repeated.commands) notes.push(`${num(t.repeated.commands)} repeated tool call(s) counted once`)
   if (t.ignored) notes.push(`${num(t.ignored)} skipped by your ignore patterns`)
   if (notes.length) lines.push(`(${notes.join('; ')}.)`)
+  if (t.owners && t.asks) {
+    // Owner labels come from the user's own policy file, restricted by compilePolicy to short names: safe to print.
+    lines.push('')
+    lines.push("Asks by owner (each ask counts for the first entry in your policy's owners that selects it):")
+    const width = Math.max(...t.owners.byOwner.map((o) => o.owner.length))
+    for (const o of t.owners.byOwner) lines.push(`  ${o.owner.padEnd(width)}  ${num(o.asks).padStart(9)}  ${pct(o.asks, t.asks).padStart(7)}`)
+    lines.push(`Asks without an owner: ${num(t.owners.without)} (${pct(t.owners.without, t.asks)} of asks).`)
+  }
   if (t.labels) {
     const l = t.labels
     lines.push('')
@@ -838,6 +977,7 @@ export async function replayCommand(argv, { version, defaultDir }) {
   const byCategory = Object.fromEntries(CATEGORIES.filter(([k]) => t.byCategory[k]).map(([k]) => [k, t.byCategory[k]]))
   const perDay = asksPerDay(t)
   return JSON.stringify({ vetobench: version, replay: { files, unreadable, commands, firstTs, lastTs, asks, byCategory,
+    ...(t.owners && { asksByOwner: t.owners.byOwner, asksWithoutOwner: t.owners.without }),
     ...(perDay && { asksPerDay: perDay }), repeated, ignored,
     policy: { file: Boolean(o.policy), ...policy.summary }, ...(t.labels ? { labels: t.labels } : {}) } }, null, 2)
 }

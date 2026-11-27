@@ -1,6 +1,7 @@
 // vetobench hook: the "ask before production writes, CI triggers and pushes to main" policy of `vetobench replay`, as a
 // Claude Code PreToolUse hook. `hook run` is the hook: it reads one tool call from stdin and, when the policy would ask,
-// prints the JSON that makes Claude Code ask you, with fixed category labels as the reason. `hook install` and
+// prints the JSON that makes Claude Code ask you, with fixed category labels (and the owner label your policy gives the
+// ask, if any) as the reason. `hook install` and
 // `hook uninstall` add it to or remove it from one settings file: a dry run unless --write, the file backed up first as
 // in fix, and only the hook's own entry added or removed (every other byte stays). `hook test` only reads: it checks an
 // installed hook end to end (its file, its command's paths, its policy, one ask and one silence, settings that turn
@@ -11,7 +12,7 @@ import { accessSync, chmodSync, closeSync, constants, existsSync, mkdirSync, ope
 import { createHash } from 'node:crypto'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CATEGORIES, DEFAULT_POLICY, askCategories, loadPolicy } from './replay.js'
+import { CATEGORIES, DEFAULT_POLICY, askDecision, loadPolicy } from './replay.js'
 import { spliceAllow } from './fix.js'
 import { matchesBash, readManaged } from './doctor.js'
 import { managedDir } from './rules.js'
@@ -30,7 +31,8 @@ const BIN = fileURLToPath(new URL('../bin/vetobench.js', import.meta.url))
 
 /**
  * The hook's answer to one PreToolUse input: the object that makes Claude Code ask you, or null to stay silent (the
- * call then goes through your normal permission flow). The reason holds fixed category labels only, never the command.
+ * call then goes through your normal permission flow). The reason holds fixed category labels, never the command, and
+ * ` (owner: <label>)` when an entry of the policy's owners selects the ask (a label compilePolicy restricts to a short name).
  */
 export function hookDecision(input, policy = DEFAULT_POLICY) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null
@@ -39,10 +41,10 @@ export function hookDecision(input, policy = DEFAULT_POLICY) {
   const command = input.tool_input?.command
   if (typeof command !== 'string' || !command.trim()) return null
   if (policy.ignore.some((rx) => rx.test(command))) return null
-  const hits = askCategories(command, policy)
-  if (!hits.length) return null
+  const { categories, owner } = askDecision(command, policy)
+  if (!categories.length) return null
   return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask',
-    permissionDecisionReason: REASON_PREFIX + hits.map((k) => LABELS.get(k)).join('; ') } }
+    permissionDecisionReason: REASON_PREFIX + categories.map((k) => LABELS.get(k)).join('; ') + (owner === null ? '' : ` (owner: ${owner})`) } }
 }
 
 /** All of stream as text; null for a terminal, an error, more than limit bytes, or no end within timeoutMs. */
@@ -786,7 +788,7 @@ export function testHook({ home, cwd, project = false, env = process.env, platfo
           const s = policy.summary
           add('policy', relative ? 'warn' : 'ok', `your file: ${s.categories} of ${CATEGORIES.length - 1} built-in categories, ` +
             `${num(s.rules)} rule(s) of your own, ${num(s.localHosts)} local and ${num(s.prodHosts)} production host pattern(s)` +
-            `${relative ? `; ${RELATIVE}` : ''}`)
+            `${s.owners ? `, ${num(s.owners)} owner(s)` : ''}${relative ? `; ${RELATIVE}` : ''}`)
         } catch (err) {
           add('policy', 'fail', `the file cannot be used (${policyProblem(err)}): the hook fails open, so the guard is off`)
         }
@@ -858,7 +860,7 @@ Usage: vetobench hook install [--write] [--project] [--policy FILE]
   --write     apply the change; without it, only show what would change. The file is first copied into
               ~/.claude/vetobench-backups/<time>/ (readable only by you), and only the hook's own entry changes
   --project   use this folder's .claude/settings.local.json (personal, usually not committed) instead
-  --policy F  your hosts, branches and rules, as for replay (format in METHODOLOGY.md); install stores its full path
+  --policy F  your hosts, branches, rules and owners, as for replay (format in METHODOLOGY.md); install stores its full path
 
 Prints counts only: never a command, a path or a rule. Nothing is sent anywhere.`
 
@@ -914,7 +916,8 @@ export function renderHook(plan, res, version) {
       lines.push('when the policy would ask: pushes to main, CI triggers, publishes, remote writes and the other replay categories.')
       const s = plan.policy?.summary
       lines.push(s ? `Policy: your file (the hook reads it from its full path): ${s.categories} of ${CATEGORIES.length - 1} built-in categories, ` +
-        `${num(s.rules)} rule(s) of your own, ${num(s.localHosts)} local and ${num(s.prodHosts)} production host pattern(s).`
+        `${num(s.rules)} rule(s) of your own, ${num(s.localHosts)} local and ${num(s.prodHosts)} production host pattern(s)` +
+        `${s.owners ? `, ${num(s.owners)} owner(s)` : ''}.`
         : `Policy: built-in (${DEFAULT_POLICY.summary.categories} categories). Add your own hosts and rules with --policy FILE.`)
       lines.push('The hook runs node and your global vetobench directly, not through npx, and reads no transcripts.')
     } else {

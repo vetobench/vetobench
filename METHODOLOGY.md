@@ -166,7 +166,12 @@ A JSON object; every field is optional.
     { "category": "prod-host-write", "match": "(?:\\S*/)?deploy\\.sh\\s+prod\\b" },
     { "match": "make\\s+release", "anywhere": true, "flags": "i" }
   ],
-  "ignore": ["my-guard-selftest"]
+  "ignore": ["my-guard-selftest"],
+  "owners": [
+    { "owner": "data team", "categories": ["remote-sql-write"], "hosts": ["db.*.prod.example.internal"] },
+    { "owner": "platform on-call", "categories": ["infra-apply", "k8s-write", "prod-host-write"] },
+    { "owner": "release manager", "branches": ["main", "release/*"] }
+  ]
 }
 ```
 
@@ -180,8 +185,27 @@ A JSON object; every field is optional.
 | `disable` | `[]` | Built-in category names to switch off |
 | `rules` | `[]` | Extra rules. `match` is a JavaScript regular expression tested on the command with heredoc bodies cut out. It must match where a command starts (start of a line, or after `;`, `&`, `\|`, `(` or `$(`, behind `VAR=value`, `sudo`, `timeout N` or `command`) unless `"anywhere": true`; allow a path prefix with `(?:\S*/)?`. `category` is one of the names above (default `custom`). `flags` may use `i`, `m`, `s` and `u` |
 | `ignore` | `[]` | Regular expressions. A command matching one is skipped and not counted, for example your own guard's test commands |
+| `owners` | `[]` | Who owns what. Each ask gets the label of the first entry that selects it; see [Owners](#owners-owners) |
 
-Unknown fields are an error, so a typo cannot quietly change a replay. Error messages name the field, never its value. The output reports how many hosts and rules the policy holds, never which.
+Unknown fields are an error, so a typo cannot quietly change a replay. Error messages name the field, never its value. The output reports how many hosts and rules the policy holds, never which. The one text from the policy file that vetobench prints is an owner label.
+
+### Owners (`owners`)
+
+Approving every action one by one does not scale; knowing who owns what does. `owners` works like a CODEOWNERS file for actions: each entry names an `owner` and says which asks are theirs. When the policy asks, the hook names that owner in the prompt, and `replay` counts the asks per owner. **An owner never makes an ask.** It only labels an ask that the rest of the policy already makes; a command the policy lets run stays silent whatever the owners say.
+
+| Field | Meaning |
+|---|---|
+| `owner` | Required. The label printed in the prompt and by `replay`: 1 to 40 ASCII letters, digits, spaces and `.` `_` `@` `#` `/` `&` `+` `-`, with no space at either end. So it cannot hold a quote, `=`, `:` or `$`. A label with the shape of a secret (one of the `SECRET_PATTERNS` of [Secrets left in transcripts](#secrets-left-in-transcripts---secrets), such as a token prefix) is an error too |
+| `hosts` | Host or context patterns, as for `localHosts` and `prodHosts`: `*` is a wildcard, case is ignored. They are compared with the hosts an ask is about: the host a command runs on over ssh (in any category), the scp or rsync destination, the database host of a SQL write (over ssh, with a local host or none: the remote host), the `--context` of a Kubernetes change (`--kube-context` for helm), and the API host of a `prod-api-write`. A host the command does not show (none given, or a variable) is no host, so no pattern selects it, not even `*` |
+| `branches` | Branch patterns, as for `branches`. They are compared with the branches a `git push` targets that the policy protects, so they select `push-to-main` asks only. A pull-request merge does not name the branch it merges into: select it with `categories` |
+| `categories` | Category names from the table above, `custom` included |
+| `match` | A regular expression tested on the command, as a rule's `match`: heredoc bodies cut out, anchored at a command start unless `"anywhere": true`, and `flags` with `i`, `m`, `s` and `u` |
+
+- **At least one selector.** An entry needs `hosts`, `branches`, `categories` or `match`, and a list must not be empty. `flags` and `anywhere` need a `match`.
+- **All of an entry's selectors must match, on one category.** `categories`, `hosts` and `branches` are checked together against each category of the ask, with the hosts and branches of that category's own commands; `match` is checked against the whole command. So `{"owner": "data team", "categories": ["remote-sql-write"], "hosts": ["db.*"]}` selects SQL writes to those hosts and nothing else, even in a command that also runs `terraform apply`. Within one selector, any one pattern is enough. For "this or that", write two entries with the same owner.
+- **The first entry that selects an ask wins**, in the order of the file. Put narrow entries before broad ones. One ask has one owner, also when it falls in several categories: `npm publish && git push origin main` is one ask, labelled `Push to a main branch; Package publish`, with the owner of the first entry that selects either category.
+- **No owner.** An ask that no entry selects keeps exactly the reason it has without owners.
+- **Output.** The hook's reason becomes `vetobench policy: <category labels> (owner: <owner>)`. `replay` adds "Asks by owner": one line per owner label, in the order the file first names it, with its asks and their share of all asks (a label with no ask shows 0), then "Asks without an owner". `--json` adds `asksByOwner` (a list of `{"owner", "asks"}`), `asksWithoutOwner`, and `policy.owners`, the number of entries. `hook install` and `hook test` print the number of entries, not the labels. A policy without owners prints exactly what it printed before.
 
 ### Labels (`--labels file`)
 
