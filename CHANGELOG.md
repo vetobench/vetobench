@@ -6,6 +6,10 @@ Corrections to published numbers go here as **retractions**: the claim as publis
 
 ## Unreleased
 
+### Added
+
+- `vetobench hook test [--project]`: checks an installed hook end to end without starting Claude Code, and only reads. The settings file, the vetobench handler, its matcher and its fields, the command's shape, that its node and vetobench paths still exist, which version it runs (one without `hook` fails), that its policy file loads, that the policy asks before a made-up push to main and stays silent on a harmless command, and settings that stop hooks (`disableAllHooks` by precedence, managed `allowManagedHooksOnly`, `CLAUDE_CONFIG_DIR`), plus a note for a `bypassPermissions` or `dontAsk` default mode. When the managed settings' vetobench hook is the one that runs, it tests that one. Fixed labels only; exits 1 when a check fails or could not run. CI runs it with networking off, after the install and after the uninstall.
+
 ### Docs
 
 - `docs/hook.md`: tested how the hook's "ask" meets Claude Code's permissions (Claude Code 2.1.332, headless). A matching allow-rule did not override it, nor did `bypassPermissions`; `dontAsk` turns it into a denial. The interactive dialog itself was not observed. Replaces the "the documentation does not say" caveats.

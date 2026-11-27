@@ -13,16 +13,17 @@ npm install -g vetobench          # the hook needs a lasting install (see below)
 
 vetobench hook install            # a dry run: shows what would change
 vetobench hook install --write    # adds the hook to ~/.claude/settings.json, after a backup
+vetobench hook test               # checks the installed hook end to end; only reads
 vetobench hook uninstall --write  # removes it again, after a backup
 ```
 
 | Option | Meaning |
 |---|---|
-| `--write` | Apply the change. Without it, install and uninstall only show what would change |
+| `--write` | Apply the change. Without it, install and uninstall only show what would change. `test` does not take it: it never writes |
 | `--project` | Use this folder's `.claude/settings.local.json` (personal settings for this project, usually not committed) instead of `~/.claude/settings.json` |
 | `--policy FILE` | Your hosts, branches and extra rules, in the `replay` format. `install` checks that the file loads and stores its full path in the hook |
 
-To check a policy before you install it, replay it first: `vetobench replay --policy FILE`. To check the hook itself, pipe it a made-up tool call:
+To check a policy before you install it, replay it first: `vetobench replay --policy FILE`. To check the installed hook, run `vetobench hook test` (see [Checking the hook](#checking-the-hook-vetobench-hook-test)). To try the hook command by hand, pipe it a made-up tool call:
 
 ```sh
 echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | vetobench hook run
@@ -30,9 +31,9 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 It prints the "ask" answer. If it prints nothing for a command you expected it to ask about, the command does not match the policy or the policy file did not load.
 
-The output of `install` and `uninstall` holds fixed labels and counts only: how many other settings and hooks the file holds, how many vetobench hooks would be added or removed, and how many rules and hosts your policy has. It never shows a command, a path or a rule.
+The output of `install`, `uninstall` and `test` holds fixed labels and counts only: how many other settings and hooks the file holds, how many vetobench hooks would be added or removed, how many rules and hosts your policy has, and for `test` a version string. It never shows a command, a path or a rule.
 
-Exit codes: `install` and `uninstall` exit with 1 when they refuse (also in a dry run), or when `--write` leaves the file unchanged. `hook run` always exits with 0.
+Exit codes: `install` and `uninstall` exit with 1 when they refuse (also in a dry run), or when `--write` leaves the file unchanged. `test` exits with 1 when any check fails or could not run. `hook run` always exits with 0.
 
 ## How it works
 
@@ -48,7 +49,7 @@ Claude Code runs the hook before each `Bash` tool call and passes the call as JS
 
   The reason holds only the fixed category labels (for example `Push to a main branch; Package publish`), never the command. Claude Code shows it to you in the permission prompt.
 - **Otherwise** it prints nothing and exits with 0, and the call goes through your normal permission flow. The hook never allows or denies anything by itself.
-- **It fails open.** On anything unexpected (input that is not JSON, a policy file that cannot be read or has an error, an unknown option, input over 8 MB, or input that has not ended after 5 seconds) it prints nothing and exits with 0. A broken hook then acts as no hook: it never blocks your agent, and never makes you approve every command. The cost is that a broken policy file turns the guard off without telling you, so `install` checks the policy before it writes, and the `echo … | vetobench hook run` check above shows that the hook works.
+- **It fails open.** On anything unexpected (input that is not JSON, a policy file that cannot be read or has an error, an unknown option, input over 8 MB, or input that has not ended after 5 seconds) it prints nothing and exits with 0. A broken hook then acts as no hook: it never blocks your agent, and never makes you approve every command. The cost is that a broken policy file turns the guard off without telling you, so `install` checks the policy before it writes, and `vetobench hook test` checks it again whenever you run it.
 
 ### What was checked in Claude Code's documentation
 
@@ -59,6 +60,17 @@ Checked on 2026-11-25 in the official hooks reference, <https://code.claude.com/
 - **Exit codes.** With exit code 0, Claude Code applies the JSON the hook printed. With no output and exit code 0, the call continues through the normal permission flow ("staying silent doesn't approve it"). Exit code 2 blocks the call. Any other exit code is a non-blocking error, and the call goes ahead. A hook that times out does not block the call either.
 - **Registration.** Hooks live under `hooks.PreToolUse` as matcher groups, `{"matcher": "Bash", "hooks": [{"type": "command", "command": "…", "timeout": 10}]}`, in `~/.claude/settings.json`, a project's `.claude/settings.json` or its `.claude/settings.local.json`. `timeout` is in seconds (the default for command hooks is 600). Project hooks are read from the `.claude/` folder of the folder Claude Code started in, not from parent folders. Hooks that match the same call run in parallel. An identical handler in several files runs once. When hooks disagree, `deny` beats `defer`, which beats `ask`, which beats `allow`. Claude Code's file watcher normally picks up edits to hooks in settings files. `/hooks` lists the hooks in effect.
 - **Precedence over rules.** Deny and ask rules are still evaluated whatever a hook returns. `PreToolUse` hooks run before every tool call, whether or not it needs permission.
+
+Checked on 2026-11-26 for `vetobench hook test`, in the hooks reference and the settings page, <https://code.claude.com/docs/en/settings>:
+
+- **Settings precedence.** Highest first: "managed settings, command line, project local, shared project, user". Lists merge across files; a single value comes from the highest level that sets it.
+- **`disableAllHooks`.** "Claude Code reads the value left after settings precedence applies, so a `"disableAllHooks": false` in a project's `.claude/settings.json` overrides a `true` in your user settings." And: "`disableAllHooks` set in user, project, or local settings can't disable those managed hooks. Only `disableAllHooks` set at the managed settings level can disable managed hooks."
+- **`allowManagedHooksOnly`.** Set in managed settings: "Your user, project, local, and plugin hooks are blocked."
+- **`CLAUDE_CONFIG_DIR`.** "To keep the home-directory files somewhere else, set `CLAUDE_CONFIG_DIR`; Claude Code then stores your settings, session history, and plugins there instead."
+- **Strict JSON.** "Settings files are strict JSON: a `//` comment or a trailing comma is a syntax error." Claude Code then reports a Settings Error, and the file's settings, its hooks included, do not apply. **Not in the documentation: a BOM.** `hook test` assumes, as `doctor` does, that Claude Code reads a file that starts with a BOM; that was not tested.
+- **Matchers.** `"*"`, `""` or no matcher match every tool. A matcher of only letters, digits, `_`, `-`, spaces, `,` and `|` is an exact name or a list of them. Any other matcher is a "JavaScript regular expression, unanchored".
+- **Handler fields.** `type` is one of `"command"`, `"http"`, `"mcp_tool"`, `"prompt"` or `"agent"`. With `args`, "`command` is resolved as an executable and spawned directly with `args` as the argument vector, with no shell involved." `async: true` "runs in the background without blocking". `if` holds a permission rule: "The hook command only runs if the tool call matches the pattern." `timeout` is in seconds. `onFailure: "block"` (Claude Code 2.1.295 or later) blocks the call when the hook fails or cannot start; without it, "a hook that can't start is a non-blocking error too", and the call goes ahead.
+- **Default mode.** "`permissions.defaultMode` values `auto` and `bypassPermissions` don't take effect from project or local settings."
 
 The pages do not say, in so many words, that a hook's `"ask"` wins over an allow-rule that matches the same command, or how hooks behave in `bypassPermissions` or `dontAsk` mode. So we tested it.
 
@@ -90,6 +102,36 @@ Tested on 2026-11-26 with Claude Code 2.1.332. Headless `claude -p` runs, with t
 - **Refusals** (exit code 1, nothing changed, also in a dry run): the file is not plain JSON (comments, a BOM, a trailing comma, invalid UTF-8, or not a JSON object); `hooks` or `hooks.PreToolUse` is not laid out as documented; a vetobench hook is already installed (`install`) or none is (`uninstall`); the policy file cannot be loaded; or vetobench is not installed globally (`install`).
 - **Writing (`--write`), as in `fix`.** The file is read again and left alone if it changed since the plan. Its bytes are copied into `~/.claude/vetobench-backups/<UTC time>/` (folder mode 700, file 600), and `MANIFEST.json` there names the original before the original changes. The new text goes to a temporary file in the same folder with the original's mode, and is renamed over it. A symlinked file is written through to its target, and the link stays. A hard-linked file is rewritten in place. Backups never land inside a project.
 
+### Checking the hook (`vetobench hook test`)
+
+`vetobench hook test` checks the hook that `install` wrote, end to end, without starting Claude Code. It reads `~/.claude/settings.json`, or with `--project` this folder's `.claude/settings.local.json`, and never writes anything. Each check prints a level (`ok`, `note`, `warn`, `fail`, or `skip` for a check that could not run), a fixed name and a fixed text, never a path or a command. It exits with 1 when any check fails or could not run.
+
+It tests the vetobench hook that runs: the one in that file, or the one in the managed settings when they allow only their own hooks (`allowManagedHooksOnly`) or when the file holds none. When the file holds none, it says where else `hook test` would find one (`--project` or not), and never advises installing a second hook.
+
+| Check | What it looks at | When it fails (or warns) |
+|---|---|---|
+| `settings file` | The file `install` writes, read as `install` reads it | It is missing, cannot be read or is not plain JSON. A BOM before valid JSON is a warning: Claude Code reads such a file (an assumption, see above), but `install` and `uninstall` leave it alone. When the managed hook is the one tested, problems here are notes |
+| `installed` | vetobench handlers under `hooks.PreToolUse`, and the matcher of their group | There is none, or no matcher covers `Bash` (by the matcher rules quoted above; a pattern that is not a valid regular expression covers nothing). More than one handler is a warning: identical ones run once, different ones each run. The checks below test the first whose matcher covers `Bash` |
+| `managed hook` | A vetobench handler in the managed settings, when it is the one tested | A note, or a warning when `allowManagedHooksOnly` stops the file's own hook. When it fails a check below, the advice is to tell whoever deploys the managed settings |
+| `handler` | The handler's fields | Its `type` is not `"command"`, or it has an `args` list, which makes Claude Code start the command as one program with no shell (a fail). A `shell` setting, `async`, an `if` condition, or a timeout under 1 second or not a number (Claude Code cancels a hook that runs out of time, and a cancelled hook does not block the command) are warnings, and `onFailure: "block"` is a note. `install` writes none of these. A timeout is printed only as a whole number of seconds from 1 to 3600; others show as "an unusual timeout" |
+| `command shape` | The stored command, split into words as a shell splits it | `hook run` gets options it does not take (the hook then stays silent on every command). A command that goes through `npx` or a similar runner is a warning. A command with shell syntax the check does not follow (a redirect, `$VAR`, `~` and the like) was probably edited by hand: the check reports "could not check" (`skip`) and the checks of its paths and policy do not run |
+| `node` | The node the command names | The path is gone or not executable: the hook then errors before each command, and Claude Code runs the command unchecked (or, with `onFailure: "block"`, blocks every shell command). A bare `node`, or none (vetobench started by its `#!` line), is a warning when it is on your `PATH`: the hook then depends on the `PATH` Claude Code gives hooks |
+| `vetobench` | The vetobench script the command names | It is gone, or not executable when the command runs it without node |
+| `version` | The `version` in the `package.json` of that script's package | Older than 0.2.0, which has no `hook` command: a fail, and the advice is to update the global install first (`npm install -g vetobench`), since that copy cannot install the hook again. Older than the copy running the check: a warning, because the `asks` and `stays silent` checks use the running copy's matcher, not the installed one. Newer, or unreadable, or a running copy whose own version is not a plain one (so the two cannot be compared): a note. Only a plain version (`1.2.3`, up to four digits per part, optionally `-alpha`, `-beta` or `-rc` with a number) is printed; anything else shows as "an unrecognised version" |
+| `policy` | The `--policy` file, loaded as `hook run` loads it | It does not load: the hook fails open, so the guard is off. Only the error's fixed text is printed (for example `rules[0].match is not a valid regular expression`) |
+| `asks` | The policy on a made-up `git push origin main` | The policy does not ask (a warning) |
+| `stays silent` | The policy on a made-up `ls -la` | The policy asks |
+| `hooks enabled` | Your user settings, this folder's `.claude/settings.json` and `.claude/settings.local.json`, and the managed settings files | `disableAllHooks` is true in the file that wins by precedence (managed, local, project, user; the output names only the scope; for a managed hook only managed settings count), or managed settings set `allowManagedHooksOnly` without holding a vetobench hook themselves. Managed files that cannot be read are a note |
+| `config dir` | `CLAUDE_CONFIG_DIR` | It points to another folder (a warning, without `--project`): Claude Code then reads its user settings there, not from `~/.claude/settings.json`. The line says whether the settings there hold a vetobench hook; that one is not tested. The `hooks enabled` check reads the user settings there too |
+| `permission mode` | `permissions.defaultMode`, by the same precedence (`bypassPermissions` counts only from user or managed settings) | `bypassPermissions` or `dontAsk` is a note, with what the [test](#what-was-tested-in-claude-code) found |
+
+What it cannot see:
+
+- **The prompt itself.** It does not start Claude Code (vetobench never starts a program). To see the prompt, ask your agent to run a command the policy covers, and decline it at the prompt.
+- **The installed copy's matcher.** The `asks` and `stays silent` checks run the matcher of the vetobench that runs the check, in its own process, with the policy the hook names. When the hook runs another version, the `version` line says so.
+- **The `PATH` Claude Code gives hooks.** A bare `node` or `vetobench` is looked up on the `PATH` of your shell, which can differ from it. `install` writes absolute paths for that reason.
+- **Settings it does not read.** Managed settings delivered through MDM, the Windows registry or the server, and command-line flags such as `--settings` or `--setting-sources`. Project files are read from the folder you run it in, as Claude Code reads project hooks only from the folder it starts in.
+
 ### Why a global install, and why not npx
 
 The hook runs before every shell command your agent runs, so each run should start fast and keep working.
@@ -101,14 +143,14 @@ The hook runs before every shell command your agent runs, so each run should sta
 
 ## Limits
 
-- **Where Claude Code reads its settings.** `install` edits `~/.claude/settings.json` (or the project's `settings.local.json` with `--project`). If you run Claude Code with `CLAUDE_CONFIG_DIR` pointing elsewhere, it never reads that file, so the hook will not run. Managed settings with `disableAllHooks` or `allowManagedHooksOnly` also stop it from running; `install` still says it installed the hook, because it does not read managed settings.
+- **Where Claude Code reads its settings.** `install` edits `~/.claude/settings.json` (or the project's `settings.local.json` with `--project`). If you run Claude Code with `CLAUDE_CONFIG_DIR` pointing elsewhere, it never reads that file, so the hook will not run. Managed settings with `disableAllHooks` or `allowManagedHooksOnly` also stop it from running; `install` still says it installed the hook, because it does not read managed settings. `vetobench hook test` reads them (the managed settings files, not MDM or registry settings) and `CLAUDE_CONFIG_DIR`, and says when either stops the hook.
 - **Headless runs.** In `claude -p` and other non-interactive runs there is nobody to answer the prompt, so an "ask" denies the command, and the agent sees the reason (tested, see above). In a CI job, that means the hook blocks the commands its policy covers.
 - **Uninstall tidies up.** Removing the hook also removes a `PreToolUse` list, and a `hooks` object, that end up empty, even if they were empty before you installed it.
 - **A failed write keeps its backup.** If `--write` backs a file up and then cannot write it (a read-only folder, for example), the file is unchanged and the backup folder stays in `~/.claude/vetobench-backups/`; delete it if you like.
 - **A heuristic, not a security boundary.** The hook reads command text. It does not run the command, follow aliases, functions or the scripts a command calls, or see what a program does once it runs. The [replay limits](../METHODOLOGY.md#replay-limits) apply as they are: a bare `git push` pushes the current branch, which the command does not show, so it is not asked. A determined or confused agent can write a command it does not recognise.
 - **Bash only.** File edits and MCP tools are not checked.
-- **It fails open.** A policy file that breaks after install (moved, deleted or edited into invalid JSON) switches the guard off silently. Re-run the `echo … | vetobench hook run` check after you change the policy.
-- **It can only add prompts.** The hook never answers `allow` or `deny`. Whether a prompt appears also depends on Claude Code. In our test (one version, headless), neither a matching allow-rule nor `bypassPermissions` overrode its ask, and `dontAsk` turned it into a denial; the interactive dialog itself was not observed. Claude Code can change this in any release, so try one known command in your own setup.
-- **A moved install.** If you uninstall the global package, switch Node versions with nvm, or move the policy file, the stored paths stop working. The hook then fails with an error before each shell command, which Claude Code treats as non-blocking: the command runs, unchecked. Run `vetobench hook uninstall --write` and install again.
+- **It fails open.** A policy file that breaks after install (moved, deleted or edited into invalid JSON) switches the guard off silently. Run `vetobench hook test` after you change the policy: it loads the file the hook names, as the hook does.
+- **It can only add prompts.** The hook never answers `allow` or `deny`. Whether a prompt appears also depends on Claude Code. In our test (one version, headless), neither a matching allow-rule nor `bypassPermissions` overrode its ask, and `dontAsk` turned it into a denial; the interactive dialog itself was not observed. Claude Code can change this in any release. `vetobench hook test` checks your setup, but it does not start Claude Code, so the prompt itself still needs one real try: ask your agent to run a command the policy covers, and decline it at the prompt.
+- **A moved install.** If you uninstall the global package, switch Node versions with nvm, or move the policy file, the stored paths stop working. The hook then fails with an error before each shell command, which Claude Code treats as non-blocking: the command runs, unchecked. `vetobench hook test` finds this (its `node`, `vetobench` and `policy` checks fail). Run `vetobench hook uninstall --write` and install again.
 - **Prompts you see too often stop being read.** Run `vetobench replay` with your policy first. Its asks-per-day line shows how often the hook would have asked you.
 - **Windows is untested.** The command is quoted for a POSIX shell.
