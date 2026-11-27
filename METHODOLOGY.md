@@ -33,6 +33,12 @@ Each decision is also counted by where the agent was running when it was made.
 
 Tool definitions inside API-request records are ignored: they list every tool, so matching on them would mark every session as a loop. `/schedule` is not counted as a loop: it creates a cloud routine that runs elsewhere and leaves no local transcript. Subagents started from a loop count as subagents.
 
+## Interactive and headless runs (`vetobench headless`)
+
+Every transcript record carries an `entrypoint` field, the value of `CLAUDE_CODE_ENTRYPOINT`. `vetobench headless` counts a decision as headless when its own record says `sdk-cli` (`claude -p`), `sdk-ts` or `sdk-py` (the Agent SDKs) or `claude-code-github-action`, and as interactive for `cli`, `claude-vscode` or `claude-desktop`. Any other value, or none, is unknown, never guessed. Only `cli` and `sdk-cli` were seen in real transcripts; the other values come from Claude Code's own code.
+
+A call that would have shown a permission prompt in a run that cannot show one is recorded as `reject` from `config` with no `reasonType`, and a `reasonCode` that gives the cause (tested with Claude Code 2.1.332 in `claude -p`: `hook:PreToolUse` for a hook's ask, `unknown` when no rule allowed the call). Claude Code's code also records such a refusal with `reasonType` `asyncAgent` where it avoids prompts by design. These count as "refused because no one could approve", by cause, with those inside subagents counted as in [Where the agent was running](#where-the-agent-was-running). Method, the tested shapes and the limits are in [docs/headless.md](https://github.com/vetobench/vetobench/blob/main/docs/headless.md).
+
 ## Wildcard attribution
 
 Which allow-rule approved a shell command is not recorded, so vetobench reconstructs it. The method is a port of the analysis behind CLAIMS #4, kept exact so that number can be replayed.
@@ -105,6 +111,7 @@ Each of these follows the same rules as the card: it reads local files, sends no
 - **`graph`** ([docs/graph.md](https://github.com/vetobench/vetobench/blob/main/docs/graph.md)): the card's totals per UTC day (per bucket of whole weeks past 92 days), as one self-contained HTML file. Decisions with no valid timestamp, or dated before 2025 or after the day the page is made, are counted at the top but not drawn, and the page says how many.
 - **`mcp`** ([docs/mcp.md](https://github.com/vetobench/vetobench/blob/main/docs/mcp.md)): MCP servers from the configuration files Claude Code documents, MCP allow, deny and ask rules, and MCP tool calls by gate.
 - **`hook`** ([docs/hook.md](https://github.com/vetobench/vetobench/blob/main/docs/hook.md)): the `replay` policy run live as a `PreToolUse` hook; it fails open (an error never blocks the agent).
+- **`headless`** ([docs/headless.md](https://github.com/vetobench/vetobench/blob/main/docs/headless.md)): the card's decisions split by run kind (see [Interactive and headless runs](#interactive-and-headless-runs-vetobench-headless)); its gates refine the card's and add up to the same totals.
 - **`scrub`** ([docs/scrub.md](https://github.com/vetobench/vetobench/blob/main/docs/scrub.md)): the `SECRET_PATTERNS` of [Secrets left in transcripts](#secrets-left-in-transcripts---secrets), minus `$VARIABLE` references; only the value is replaced, each changed line is parsed again, and files written in the last 10 minutes are left alone. A session whose earlier messages were redacted may not resume on newer models.
 - **`check-settings`** ([action/README.md](https://github.com/vetobench/vetobench/blob/main/action/README.md)): the secret and broad-wildcard checks of `fix`, plus a bare `Bash` allow (`Bash`, `Bash()`, `Bash(*)` or `Bash(:*)`, which approves every shell command), for committed settings in CI.
 - **Codex CLI** ([docs/codex.md](https://github.com/vetobench/vetobench/blob/main/docs/codex.md)): not supported; its transcripts do not record who approved each tool call.

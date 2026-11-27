@@ -4,6 +4,12 @@ Notable changes to vetobench, newest first. Versions follow [Semantic Versioning
 
 Corrections to published numbers go here as **retractions**: the claim as published, the corrected number, why it was wrong, and the [CLAIMS.md](CLAIMS.md) line it affects. That line stays in CLAIMS.md, marked retracted, so the record stays complete.
 
+## Unreleased
+
+### Added
+
+- `vetobench headless [dir] [--since] [--until] [--json | --md]`: how much of your agent's work ran headless (`claude -p`, the Agent SDK, the GitHub Action), who approved it there, and how often it was refused because a prompt would have been shown and no one could answer it. Sessions are split by the `entrypoint` marker on each record (interactive, headless, unknown; an unknown value is never guessed). For headless runs: decisions by gate (static rules, permission mode, classifier, hook, a prompt answered through the SDK, every kind of block), and refusals for want of an approver by cause (a hook asked, an ask rule matched, a safety check asked, the classifier gave no verdict, no rule allowed it), including how many were inside subagents. A short "what this means" footer of fixed text. The record shapes were tested with Claude Code 2.1.332 in `claude -p` (see docs/headless.md). Fixed labels and counts only; CI runs it with networking off.
+
 ## 0.3.0 (2026-11-27)
 
 ### Added
