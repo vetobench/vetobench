@@ -416,14 +416,27 @@ test('hook test: a broken policy fails (the guard is off) without printing its p
 
     for (const [content, why] of [[`{ "rules": [ "${LEAK}"`, 'policy: the --policy file is not valid JSON'],
       [{ rules: [{ match: `(${LEAK}` }] }, 'policy: rules[0].match is not a valid regular expression'],
-      [{ owners: [{ owner: `${LEAK}=x`, hosts: ['db'] }] }, 'policy: owners[0].owner must be 1 to 40 characters'],
-      [{ owners: [{ owner: 'data team', match: `(${LEAK}` }] }, 'policy: owners[0].match is not a valid regular expression'],
       [{ [LEAK]: true }, 'policy: unknown field']]) {
       write(policy, content)
       const r = await check(t)
       assert.equal(r.code, 1, why)
       assert.equal(levelOf(r, 'policy'), 'fail')
       assert.ok(textOf(r, 'policy').includes(why), textOf(r, 'policy'))
+    }
+
+    // An error in owners alone does not turn the guard off: hook run drops the owners and still asks (a warning).
+    for (const [owners, why] of [[[{ owner: `${LEAK}=x`, hosts: ['db'] }], 'policy: owners[0].owner must be 1 to 40 characters'],
+      [[{ owner: 'data team', match: `(${LEAK}` }], 'policy: owners[0].match is not a valid regular expression'],
+      [[{ owner: 'data team', match: `(${LEAK}+)+$`, anywhere: true }], 'policy: owners[0].match could take very long on a crafted command']]) {
+      write(policy, { rules: [{ match: 'make\\s+release' }], owners })
+      const r = await check(t)
+      assert.equal(r.code, 0, why)
+      assert.equal(levelOf(r, 'policy'), 'warn')
+      assert.ok(textOf(r, 'policy').startsWith('your file: 12 of 12 built-in categories, 1 rule(s) of your own, 0 local and 0 production host pattern(s); ' +
+        `its owners cannot be used (${why}`), textOf(r, 'policy'))
+      assert.match(textOf(r, 'policy'), /\), so the hook asks without owner labels$/)
+      assert.equal(levelOf(r, 'asks'), 'ok')
+      assert.match(r.text, /vetobench replay --policy FILE/)
     }
 
     for (const content of [{ disable: ['push-to-main'] }, { ignore: ['origin'] }, { branches: [`${LEAK}-trunk`] }]) {

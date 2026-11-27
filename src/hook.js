@@ -75,7 +75,8 @@ export function readInput(stream, { limit = MAX_INPUT, timeoutMs = READ_TIMEOUT_
 
 /**
  * `vetobench hook run [--policy FILE]`: the text to print, '' for nothing. It never throws. Bad input, an unknown
- * option or a policy file that cannot be read all give '' (fail open), so a broken hook never blocks the agent.
+ * option or a policy file that cannot be read all give '' (fail open), so a broken hook never blocks the agent. An
+ * error in the policy's owners alone drops the owners: the hook still asks, without a label.
  */
 export async function runHook(argv, { stdin }) {
   try {
@@ -86,7 +87,7 @@ export async function runHook(argv, { stdin }) {
       if (argv[i] === '--policy' && argv[i + 1] !== undefined && file === null) file = argv[++i]
       else return ''
     }
-    const decision = hookDecision(JSON.parse(text), file === null ? DEFAULT_POLICY : loadPolicy(file))
+    const decision = hookDecision(JSON.parse(text), file === null ? DEFAULT_POLICY : loadPolicy(file, { dropBadOwners: true }))
     return decision ? JSON.stringify(decision) : ''
   } catch {
     return ''
@@ -783,14 +784,19 @@ export function testHook({ home, cwd, project = false, env = process.env, platfo
         add('policy', 'ok', `built-in (${DEFAULT_POLICY.summary.categories} categories)`)
       } else {
         const relative = !isAbsolute(shape.policy)
+        const file = resolve(cwd, shape.policy)
+        const counts = (s) => `your file: ${s.categories} of ${CATEGORIES.length - 1} built-in categories, ` +
+          `${num(s.rules)} rule(s) of your own, ${num(s.localHosts)} local and ${num(s.prodHosts)} production host pattern(s)` +
+          `${s.owners ? `, ${num(s.owners)} owner(s)` : ''}${relative ? `; ${RELATIVE}` : ''}`
         try {
-          policy = loadPolicy(resolve(cwd, shape.policy))
-          const s = policy.summary
-          add('policy', relative ? 'warn' : 'ok', `your file: ${s.categories} of ${CATEGORIES.length - 1} built-in categories, ` +
-            `${num(s.rules)} rule(s) of your own, ${num(s.localHosts)} local and ${num(s.prodHosts)} production host pattern(s)` +
-            `${s.owners ? `, ${num(s.owners)} owner(s)` : ''}${relative ? `; ${RELATIVE}` : ''}`)
+          policy = loadPolicy(file)
+          add('policy', relative ? 'warn' : 'ok', counts(policy.summary))
         } catch (err) {
-          add('policy', 'fail', `the file cannot be used (${policyProblem(err)}): the hook fails open, so the guard is off`)
+          // An error in owners alone: hook run drops the owners and still asks, as this load shows.
+          if (/^policy: owners/.test(String(err?.message))) try { policy = loadPolicy(file, { dropBadOwners: true }) } catch {}
+          if (policy) {
+            add('policy', 'warn', `${counts(policy.summary)}; its owners cannot be used (${policyProblem(err)}), so the hook asks without owner labels`)
+          } else add('policy', 'fail', `the file cannot be used (${policyProblem(err)}): the hook fails open, so the guard is off`)
         }
       }
     }
@@ -974,7 +980,9 @@ export function renderHookTest(r, version) {
   } else if (broken) {
     lines.push('', `To repair it, run \`vetobench hook uninstall --write${flag}\`, then \`vetobench hook install --write${flag}\`.`)
   }
-  if (failed('policy')) lines.push('', 'To see what is wrong with the policy, run `vetobench replay --policy FILE` with its file.')
+  if (failed('policy') || r.checks.some((c) => c.label === 'policy' && /owners cannot be used/.test(c.text))) {
+    lines.push('', 'To see what is wrong with the policy, run `vetobench replay --policy FILE` with its file.')
+  }
   lines.push('')
   lines.push('This checks the setup; it does not start Claude Code. To see the prompt itself, ask your agent to run')
   lines.push('a command the policy covers, and decline it at the prompt.')

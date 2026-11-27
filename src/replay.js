@@ -581,6 +581,81 @@ const OWNER_SELECTORS = ['hosts', 'branches', 'categories', 'match']
 const OWNER_LABEL = /^(?=.{1,40}$)[A-Za-z0-9._@#/&+-](?:[A-Za-z0-9 ._@#/&+-]*[A-Za-z0-9._@#/&+-])?$/
 const OWNER_LABEL_TEXT = '1 to 40 characters: letters, digits, spaces (not at either end) and . _ @ # / & + -'
 
+// Owners' patterns run on text the agent writes, and a regular expression cannot be stopped once it runs (no vm or
+// worker here: they are off limits). These limits keep the time a label can take far below the hook's timeout, so a
+// label never costs the ask. They are counts, not a clock, so a replay gives the same owners on every machine.
+/** Owners are looked up only for commands up to this many characters; a longer command's ask has no owner. */
+export const MAX_OWNER_COMMAND = 4096
+/** A host or branch longer than this is not compared with owners' patterns (a DNS name has at most 253). */
+const MAX_OWNER_TARGET = 255
+/** At most this many owners entries may have a match, at most this many `*` in one host or branch pattern, and at
+ * most this many ways for one match to branch (the arities of its alternations times 2 for each `?`). */
+export const MAX_OWNER_MATCHES = 16
+const MAX_OWNER_STARS = 2
+const MAX_OWNER_BRANCHING = 16
+
+/**
+ * Why a match pattern could take very long on a crafted command, as fixed text, or null. Conservative: it refuses a
+ * repeated group that holds a quantifier or |, more than one quantifier that repeats (*, +, {n,} or {n,m}), more than
+ * MAX_OWNER_BRANCHING ways to branch, and back-references. Measured worst case of an accepted pattern on a command of
+ * MAX_OWNER_COMMAND characters: about 0.1 s. The pattern has already compiled, so the syntax is valid.
+ */
+export function slowPattern(src) {
+  const stack = [{ inner: false, alts: 1 }]
+  let repeating = 0
+  let branching = 1
+  let atom = null // what a quantifier would apply to: a group frame, or 'char'
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]
+    const top = stack[stack.length - 1]
+    let q = null // [min, max] of a quantifier
+    if (c === '\\') {
+      const n = src[i + 1] ?? ''
+      if (/[1-9]/.test(n) || (n === 'k' && src[i + 2] === '<')) return 'it uses a back-reference'
+      if (/[pPu]/.test(n) && src[i + 2] === '{') i = Math.max(i + 1, src.indexOf('}', i + 2))
+      else i += n === 'x' ? 3 : n === 'u' ? 5 : n === 'c' ? 2 : 1
+      atom = 'char'
+    } else if (c === '[') {
+      let j = i + 1 // in JavaScript `[]` is an empty class: a ']' right after '[' or '[^' ends it
+      if (src[j] === '^') j++
+      for (; j < src.length && src[j] !== ']'; j++) if (src[j] === '\\') j++
+      i = j
+      atom = 'char'
+    } else if (c === '(') {
+      const m = /^\((?:\?(?:<[=!]|<[^>]*>|[=!:]|[a-zA-Z-]+:))?/.exec(src.slice(i))
+      i += m[0].length - 1
+      stack.push({ inner: false, alts: 1 })
+      atom = null
+    } else if (c === ')') {
+      const g = stack.length > 1 ? stack.pop() : top
+      branching *= g.alts
+      g.inner ||= g.alts > 1 // its own | counts: (a|a)* is as slow as (a+)*
+      stack[stack.length - 1].inner ||= g.inner
+      atom = g
+    } else if (c === '|') {
+      top.alts += 1
+      atom = null
+    } else if (c === '*' || c === '+' || c === '?') q = [c === '+' ? 1 : 0, c === '?' ? 1 : Infinity]
+    else if (c === '{' && /^\{\d+(?:,\d*)?\}/.test(src.slice(i))) {
+      const [, lo, comma, hi] = /^\{(\d+)(,?)(\d*)\}/.exec(src.slice(i))
+      q = [Number(lo), !comma ? Number(lo) : hi === '' ? Infinity : Number(hi)]
+      i = src.indexOf('}', i)
+    } else atom = 'char'
+    if (!q) continue
+    if (src[i + 1] === '?') i++ // lazy
+    const [lo, hi] = q
+    if (hi >= 2 && atom && atom !== 'char' && atom.inner) return 'it repeats a group that holds a quantifier or |'
+    if (hi > lo && hi > 1) repeating += 1
+    else if (hi > lo) branching *= 2
+    top.inner = true
+    atom = null
+  }
+  branching *= stack[0].alts
+  if (repeating > 1) return 'it has more than one *, + or {n,m}'
+  if (branching > MAX_OWNER_BRANCHING) return `it can branch more than ${MAX_OWNER_BRANCHING} ways (alternatives and ? multiplied)`
+  return null
+}
+
 const globRx = (s, flags) => new RegExp('^' + s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$', flags)
 /** Host and context patterns (localHosts, prodHosts, owners' hosts): `*` is a wildcard, case is ignored. */
 const hostPatterns = (list) => list.map((s) => globRx(s.toLowerCase(), 'i'))
@@ -603,12 +678,12 @@ function matchRx(r, where) {
 function compileOwners(raw, names) {
   if (raw === undefined) return []
   if (!Array.isArray(raw)) throw new Error('policy: owners must be a list')
-  return raw.map((o, i) => {
+  const owners = raw.map((o, i) => {
     const at = `owners[${i}]`
     if (!o || typeof o !== 'object' || Array.isArray(o)) throw new Error(`policy: ${at} must be an object with an "owner" label`)
     if (Object.keys(o).some((k) => !OWNER_FIELDS.includes(k))) throw new Error(`policy: ${at} has an unknown field (known: ${OWNER_FIELDS.join(', ')})`)
     if (typeof o.owner !== 'string' || !OWNER_LABEL.test(o.owner)) throw new Error(`policy: ${at}.owner must be ${OWNER_LABEL_TEXT}`)
-    if (isSecretRule(o.owner)) throw new Error(`policy: ${at}.owner has the shape of a secret (a key or token); use a team or role name`)
+    if (isSecretRule(o.owner)) throw new Error(`policy: ${at}.owner matches a known key or token shape; use a team or role name`)
     if (!OWNER_SELECTORS.some((k) => o[k] !== undefined)) throw new Error(`policy: ${at} needs at least one of ${OWNER_SELECTORS.join(', ')}`)
     const list = (k) => {
       const v = o[k]
@@ -622,15 +697,25 @@ function compileOwners(raw, names) {
     if (categories?.some((c) => !names.includes(c))) throw new Error(`policy: ${at}.categories takes category names (${names.join(', ')})`)
     const hosts = list('hosts')
     const branches = list('branches')
+    for (const [k, v] of [['hosts', hosts], ['branches', branches]]) {
+      if (v?.some((x) => x.split('*').length - 1 > MAX_OWNER_STARS)) throw new Error(`policy: ${at}.${k} patterns may hold at most ${MAX_OWNER_STARS} *`)
+    }
     if (o.match === undefined && (o.flags !== undefined || o.anywhere !== undefined)) throw new Error(`policy: ${at}.flags and anywhere need a "match"`)
     if (o.match !== undefined && (typeof o.match !== 'string' || !o.match)) throw new Error(`policy: ${at}.match must be a non-empty regular expression`)
-    return { owner: o.owner, hosts: hosts && hostPatterns(hosts), branches: branches && branchPatterns(branches), categories,
-      rx: o.match === undefined ? null : matchRx(o, at) }
+    const rx = o.match === undefined ? null : matchRx(o, at)
+    const slow = rx && slowPattern(o.match)
+    if (slow) throw new Error(`policy: ${at}.match could take very long on a crafted command: ${slow}`)
+    return { owner: o.owner, hosts: hosts && hostPatterns(hosts), branches: branches && branchPatterns(branches), categories, rx }
   })
+  if (owners.filter((o) => o.rx).length > MAX_OWNER_MATCHES) throw new Error(`policy: owners may have at most ${MAX_OWNER_MATCHES} entries with a "match"`)
+  return owners
 }
 
-/** Compile a policy object (the parsed --policy file). Errors name the field, never its value. */
-export function compilePolicy(raw = {}) {
+/**
+ * Compile a policy object (the parsed --policy file). Errors name the field, never its value. dropBadOwners: an error in
+ * owners drops the owners instead of failing the policy (the hook's choice: a label must never cost the ask).
+ */
+export function compilePolicy(raw = {}, { dropBadOwners = false } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('policy: the file must hold one JSON object')
   if (Object.keys(raw).some((k) => !POLICY_FIELDS.includes(k))) throw new Error(`policy: unknown field (known: ${POLICY_FIELDS.join(', ')})`)
   const strings = (k, fallback = []) => {
@@ -659,7 +744,8 @@ export function compilePolicy(raw = {}) {
   const localHosts = hostPatterns(strings('localHosts'))
   const prodHosts = hostPatterns(strings('prodHosts'))
   const branches = branchPatterns(strings('branches', ['main', 'master']))
-  const owners = compileOwners(raw.owners, names)
+  let owners = []
+  try { owners = compileOwners(raw.owners, names) } catch (e) { if (!dropBadOwners) throw e }
   const detectors = DETECTORS.filter(([k]) => !disable.includes(k))
   return {
     detectors, rules, ignore, localHosts, prodHosts, branches, owners,
@@ -675,8 +761,8 @@ export const DEFAULT_POLICY = compilePolicy({})
 
 // ---- Owners: whose system an ask is about ----
 
-/** A target that names a host or context; not one that is missing, a variable or a unix socket. */
-const named = (t) => typeof t === 'string' && t !== '' && !/[$`]/.test(t) && !t.startsWith('/')
+/** A target that names a host or context; not one that is missing, a variable, a unix socket, or too long to compare. */
+const named = (t) => typeof t === 'string' && t !== '' && !/[$`]/.test(t) && !t.startsWith('/') && t.length <= MAX_OWNER_TARGET
 
 /**
  * What an owner's hosts see of one simple command asked about in a category: the host it runs on over ssh, and the
@@ -692,7 +778,7 @@ function askHosts(name, s, p) {
   host(s.host)
   if (name === 'copy-to-remote') host(copyDest(s))
   else if (name === 'remote-sql-write') host(sqlTarget(s))
-  else if (name === 'prod-api-write') out.push(...prodUrlHosts(s, p))
+  else if (name === 'prod-api-write') out.push(...prodUrlHosts(s, p).filter((h) => h.length <= MAX_OWNER_TARGET))
   else if (name === 'k8s-write') {
     const c = kubeContext(s)
     if (named(c)) out.push(c.toLowerCase())
@@ -721,11 +807,12 @@ function ownerOf(owners, categories, found, text) {
 /**
  * What the policy does with one shell command: { categories, owner }. categories are the ones it would be asked about,
  * in display order, empty when the policy lets it run. owner is the label of the first owners entry that selects the
- * ask, or null (always null without an ask: an owner never makes one).
+ * ask, or null (always null without an ask: an owner never makes one, and for a command over MAX_OWNER_COMMAND
+ * characters). The categories are worked out first and do not depend on the owners.
  */
 export function askDecision(command, policy = DEFAULT_POLICY) {
   const { text, segs } = parseCommand(command)
-  const owners = policy.owners ?? []
+  const owners = String(command ?? '').length <= MAX_OWNER_COMMAND ? policy.owners ?? [] : []
   // Per category hit: the hosts and protected branches its simple commands target (collected only for owners).
   const found = new Map()
   const at = (k) => found.get(k) ?? found.set(k, { hosts: new Set(), branches: new Set() }).get(k)
@@ -735,7 +822,7 @@ export function askDecision(command, policy = DEFAULT_POLICY) {
       const f = at(name)
       if (!owners.length) break
       for (const h of askHosts(name, s, policy)) f.hosts.add(h)
-      if (name === 'push-to-main') for (const b of protectedPushes(s, policy)) f.branches.add(b)
+      if (name === 'push-to-main') for (const b of protectedPushes(s, policy)) if (b.length <= MAX_OWNER_TARGET) f.branches.add(b)
     }
   }
   for (const r of policy.rules) if (r.rx.test(text)) at(r.category)
@@ -870,7 +957,7 @@ Usage: ${REPLAY_USAGE}
   --since / --until window by UTC day of the tool call (until is exclusive)
   --policy file     your hosts, branches, extra rules and owners (JSON; format in METHODOLOGY.md)
   --labels file     your verdict per tool call id, "ask" or "allow", to count right and wrong asks
-  --json            aggregates as JSON (safe to share: counts only)
+  --json            aggregates as JSON (safe to share: counts, plus your owner labels if your policy has owners)
 
 Replays your agent's shell commands against the policy and prints counts. No command is printed. Nothing is sent anywhere.`
 
@@ -898,13 +985,13 @@ function readFlagFile(path, flag) {
   try { return readFileSync(path, 'utf8') } catch { throw new Error(`cannot read the ${flag} file`) }
 }
 
-export function loadPolicy(path) {
+export function loadPolicy(path, opts = {}) {
   let raw
   try { raw = JSON.parse(readFlagFile(path, '--policy')) } catch (e) {
     // JSON.parse messages quote the input: never pass them on.
     throw e.message.startsWith('cannot read') ? e : new Error('policy: the --policy file is not valid JSON')
   }
-  return compilePolicy(raw)
+  return compilePolicy(raw, opts)
 }
 
 export function renderReplay(t, policy, version, fromFile = false) {

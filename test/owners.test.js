@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
-import { askCategories, askDecision, compilePolicy, replayCommand, scanReplay } from '../src/replay.js'
+import { MAX_OWNER_COMMAND, MAX_OWNER_MATCHES, askCategories, askDecision, compilePolicy, replayCommand, scanReplay, slowPattern } from '../src/replay.js'
 import { hookDecision, runHook } from '../src/hook.js'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'replay')
@@ -14,6 +14,7 @@ const PG = 'postgresql' + '://'
 const payload = (command) => ({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } })
 const reason = (command, policy) => hookDecision(payload(command), policy)?.hookSpecificOutput.permissionDecisionReason ?? null
 const owner = (command, policy) => askDecision(command, policy).owner
+const PUSH = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"vetobench policy: Push to a main branch"}}'
 const withTemp = async (fn) => {
   const dir = mkdtempSync(join(tmpdir(), 'vetobench-owners-'))
   try { return await fn(dir) } finally { rmSync(dir, { recursive: true, force: true }) }
@@ -54,7 +55,7 @@ test('owners: labels are short names; every bad entry is an error naming the fie
   }
   // Labels in the allowed set that have the shape of a secret: a GitHub token, an AWS key id, a private-key header.
   const secretish = ['ghp_' + 'Ab12'.repeat(9), 'AKIA' + 'HUNTER2EXAMPLE12', '-----BEGIN RSA PRIVATE KEY-----']
-  for (const v of secretish) bad.push([{ owners: [{ owner: v, hosts: ['x'] }] }, /owners\[0\]\.owner has the shape of a secret/])
+  for (const v of secretish) bad.push([{ owners: [{ owner: v, hosts: ['x'] }] }, /owners\[0\]\.owner matches a known key or token shape/])
   for (const [raw, rx] of bad) {
     assert.throws(() => compilePolicy(raw), (e) => rx.test(e.message) && !e.message.includes('hunter2') && !secretish.some((s) => e.message.includes(s)),
       JSON.stringify(raw))
@@ -154,8 +155,6 @@ test('owners never create an ask: a command the policy lets run stays silent, wh
     without: 0 })
 })
 
-const PUSH = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"vetobench policy: Push to a main branch"}}'
-
 test('hook: the reason names the owner when one is found, and is byte for byte unchanged otherwise', async () => {
   const p = compilePolicy({ owners: [{ owner: 'data team', hosts: ['db.*.internal'] }, { owner: 'release manager', categories: ['package-publish'] }] })
   assert.equal(reason('psql -h db.example.internal -c "DELETE FROM sessions WHERE id = 1"', p), 'vetobench policy: SQL write to a non-local database (owner: data team)')
@@ -172,8 +171,12 @@ test('hook: the reason names the owner when one is found, and is byte for byte u
     const out = await runHook(['--policy', file], { stdin: () => Readable.from([JSON.stringify(payload('git push origin main'))]) })
     assert.equal(out, PUSH.replace('Push to a main branch"', 'Push to a main branch (owner: release manager)"'))
     writeFileSync(file, JSON.stringify({ owners: [{ owner: 'bad label!', branches: ['main'] }] }))
+    assert.throws(() => compilePolicy({ owners: [{ owner: 'bad label!', branches: ['main'] }] }), /owners\[0\]\.owner must be/)
+    assert.equal(await runHook(['--policy', file], { stdin: () => Readable.from([JSON.stringify(payload('git push origin main'))]) }), PUSH,
+      'an owners error alone: the hook drops the owners and still asks')
+    writeFileSync(file, JSON.stringify({ owners: [{ owner: 'release manager', branches: ['main'] }], prodHosts: 'x' }))
     assert.equal(await runHook(['--policy', file], { stdin: () => Readable.from([JSON.stringify(payload('git push origin main'))]) }), '',
-      'an invalid owner label is a policy error: the hook fails open')
+      'any other policy error still fails open')
   })
 })
 
@@ -189,6 +192,80 @@ test('owners: the example in docs/hook.md and METHODOLOGY.md gives the reasons t
     'vetobench policy: Push to a main branch; Infrastructure apply or destroy (owner: platform on-call)')
   assert.equal(reason('gh workflow run deploy.yml --ref main', p), 'vetobench policy: CI trigger or release')
   assert.equal(reason('npm publish && git push origin main', p), 'vetobench policy: Push to a main branch; Package publish (owner: release manager)')
+})
+
+const ms = (fn) => {
+  const t = process.hrtime.bigint()
+  const v = fn()
+  return [Number(process.hrtime.bigint() - t) / 1e6, v]
+}
+
+test('owners: a match that could backtrack for long on a crafted command is refused, with a fixed reason', () => {
+  for (const src of [String.raw`(?:\S*/)?migrate\.sh\b`, String.raw`deploy\.sh\s+prod\b`, 'make release', '.*!', String.raw`\p{L}+x`,
+    String.raw`[a-z]{3}-db`, '(?:ab){2,5}', String.raw`(?:deploy|release|migrate)\.sh\s+(?:prod|production)`, String.raw`x\u{1F600}?y`,
+    String.raw`a\x41{2}`, '[]a+', '(?<name>ab)c*', '(?<=a)b+', 'a{0,1}b{0,1}c*']) {
+    assert.equal(slowPattern(src), null, src)
+  }
+  for (const [src, why] of [['(a+)+$', /repeats a group/], ['(a*)*b', /repeats a group/], ['(a|a)*b', /repeats a group/],
+    [String.raw`(?:\w+\s?){2}`, /repeats a group/], ['((ab)+c)+', /repeats a group/], ['(?:(?:a|b))+', /repeats a group/],
+    ['.*.*z', /more than one/], [String.raw`\S+y\S+z`, /more than one/], ['a{1,9}b{2,}', /more than one/], ['(?=.*x).*y', /more than one/],
+    ['(a)\\1', /back-reference/], ['(?<n>a)\\k<n>', /back-reference/],
+    ['a?a?a?a?a?b', /branch more than 16/], ['(?:a|a)(?:a|a)(?:a|a)(?:a|a)(?:a|a)b', /branch more than 16/], ['[](a+)+', /repeats a group/]]) {
+    assert.match(slowPattern(src) ?? 'accepted', why, src)
+  }
+  // As a policy error: the field and index, the reason, never the pattern.
+  assert.throws(() => compilePolicy({ owners: [{ owner: 'x', categories: ['custom'] }, { owner: 'y', match: '(hunter2+)+$', anywhere: true }] }),
+    (e) => /^policy: owners\[1\]\.match could take very long on a crafted command: it repeats a group/.test(e.message) && !e.message.includes('hunter2'))
+  assert.throws(() => compilePolicy({ owners: [{ owner: 'x', hosts: ['*hunter2*a*'] }] }),
+    (e) => /^policy: owners\[0\]\.hosts patterns may hold at most 2 \*$/.test(e.message))
+  assert.throws(() => compilePolicy({ owners: [{ owner: 'x', branches: ['*/*/*'] }] }), /owners\[0\]\.branches patterns may hold at most 2/)
+  assert.equal(compilePolicy({ owners: [{ owner: 'x', hosts: ['*.prod.*'] }] }).owners.length, 1)
+  const many = Array.from({ length: MAX_OWNER_MATCHES + 1 }, (_, i) => ({ owner: `team ${i}`, match: `tool${i}` }))
+  assert.throws(() => compilePolicy({ owners: many }), /owners may have at most 16 entries with a "match"/)
+  assert.equal(compilePolicy({ owners: many.slice(1) }).owners.length, MAX_OWNER_MATCHES)
+})
+
+test('owners: a label never costs the ask: a bad owners list is dropped by the hook, and accepted patterns stay fast', async () => {
+  // The reviewer's repro: the hook drops the owners (replay and install refuse the file) and asks at once, unlabelled.
+  const evil = { owners: [{ owner: 'x', match: '(a+)+$', anywhere: true }] }
+  assert.throws(() => compilePolicy(evil), /could take very long/)
+  assert.equal(compilePolicy(evil, { dropBadOwners: true }).owners.length, 0)
+  assert.throws(() => compilePolicy({ ...evil, prodHosts: 'x' }, { dropBadOwners: true }), /prodHosts must be a list/, 'other errors still fail')
+  await withTemp(async (dir) => {
+    const file = join(dir, 'policy.json')
+    writeFileSync(file, JSON.stringify(evil))
+    const cmd = 'git push origin main # ' + 'a'.repeat(27) + '!'
+    const t0 = process.hrtime.bigint()
+    const out = await runHook(['--policy', file], { stdin: () => Readable.from([JSON.stringify(payload(cmd))]) })
+    assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 2000)
+    assert.equal(out, PUSH)
+  })
+
+  // The worst accepted shapes, on crafted commands at the length cap, all owners entries tried: well under the hook's
+  // 10-second timeout (measured at about 0.1 s for each such entry).
+  const worst = ['(?:a|aa|aaa|aaaa)(?:a|aa|aaa|aaaa)a*!', '(?:a|a)(?:a|a)(?:a|a)(?:a|a)a*!', '.*!', String.raw`\s*!`, 'a?a?a?a?a*!']
+  const owners = worst.flatMap((match) => [{ owner: 'x', match, anywhere: true }, { owner: 'y', match }])
+  const p = compilePolicy({ owners, rules: [{ match: 'a', anywhere: true }] })
+  const texts = ['a'.repeat(MAX_OWNER_COMMAND), ';a'.repeat(MAX_OWNER_COMMAND / 2), ';' + ' '.repeat(MAX_OWNER_COMMAND - 2) + 'a',
+    'A=b a'.repeat(MAX_OWNER_COMMAND / 5)]
+  let total = 0
+  for (const text of texts) {
+    const [took, d] = ms(() => askDecision(text, p))
+    assert.deepEqual(d, { categories: ['custom'], owner: null })
+    total += took
+  }
+  assert.ok(total < 4000, `${total.toFixed(0)} ms`) // about 0.4 s on a laptop; generous for slow CI runners
+
+  // Over the cap, no owner is looked up, however the entries would match.
+  const any = compilePolicy({ owners: [{ owner: 'release manager', categories: ['push-to-main'] }] })
+  assert.equal(owner('git push origin main #' + ' '.repeat(MAX_OWNER_COMMAND - 22), any), 'release manager')
+  assert.deepEqual(askDecision('git push origin main #' + ' '.repeat(MAX_OWNER_COMMAND - 21), any), { categories: ['push-to-main'], owner: null })
+  // Hosts and branches past 255 characters are not compared, so a long crafted host cannot slow a two-star pattern.
+  const star = compilePolicy({ branches: ['*'], owners: [{ owner: 'x', hosts: ['*a*b'] }, { owner: 'y', branches: ['*a*b'] }] })
+  const [took, d] = ms(() => askDecision(`ssh ${'a'.repeat(300)} 'sudo systemctl restart api'; git push origin ${'a'.repeat(300)}`, star))
+  assert.deepEqual(d, { categories: ['push-to-main', 'prod-host-write'], owner: null })
+  assert.ok(took < 500, `${took.toFixed(0)} ms`)
+  assert.equal(owner(`ssh ${'a'.repeat(200)}b 'sudo systemctl restart api'`, star), 'x')
 })
 
 // The replay output of 0.3.0 for the fixture, before owners existed: policies without owners must print exactly this.
