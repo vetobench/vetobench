@@ -42,6 +42,11 @@ jobs:
           offline node bin/vetobench.js scrub test/fixtures/secrets --json
           offline env HOME="$RUNNER_TEMP" node bin/vetobench.js doctor test/fixtures/projects --json
           offline env HOME="$RUNNER_TEMP" node bin/vetobench.js mcp test/fixtures/projects --json
+          # headless: the synthetic fixture's five refusals for want of an approver, in all three forms
+          offline node bin/vetobench.js headless test/fixtures/headless
+          offline node bin/vetobench.js headless test/fixtures/headless --md
+          out=$(offline node bin/vetobench.js headless test/fixtures/headless --json)
+          printf '%s' "$out" | grep -q '"no-approver": 5'
           # hook run: must answer "ask" for a push to main, and print nothing for a harmless command. Each output is
           # captured first, so a crash (a non-zero exit) fails the step instead of looking like silence.
           out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | offline node bin/vetobench.js hook run)
