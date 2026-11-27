@@ -116,6 +116,14 @@ test('hook test: a healthy install is ready (exit 0), every check ok, and nothin
     assert.equal(p.code, 0, p.text)
     assert.equal(textOf(p, 'policy'), 'your file: 12 of 12 built-in categories, 1 rule(s) of your own, 2 local and 1 production host pattern(s)')
     assert.equal(textOf(p, 'command shape'), 'runs node and vetobench with a policy file')
+
+    // With owners: their number, never their labels (check() fails on the marker, which the labels carry).
+    write(policy, { rules: [{ match: `${LEAK}-release` }], prodHosts: [`${LEAK}.example`], owners: [{ owner: `${LEAK} release manager`, branches: ['main'] },
+      { owner: `${LEAK} data team`, hosts: [`db.${LEAK}.example`] }] })
+    const o = await check(t)
+    assert.equal(o.code, 0, o.text)
+    assert.equal(textOf(o, 'policy'), 'your file: 12 of 12 built-in categories, 1 rule(s) of your own, 0 local and 1 production host pattern(s), 2 owner(s)')
+    assert.equal(levelOf(o, 'asks'), 'ok')
   } finally {
     cleanup(t)
   }
@@ -414,6 +422,21 @@ test('hook test: a broken policy fails (the guard is off) without printing its p
       assert.equal(r.code, 1, why)
       assert.equal(levelOf(r, 'policy'), 'fail')
       assert.ok(textOf(r, 'policy').includes(why), textOf(r, 'policy'))
+    }
+
+    // An error in owners alone does not turn the guard off: hook run drops the owners and still asks (a warning).
+    for (const [owners, why] of [[[{ owner: `${LEAK}=x`, hosts: ['db'] }], 'policy: owners[0].owner must be 1 to 40 characters'],
+      [[{ owner: 'data team', match: `(${LEAK}+)+$`, anywhere: true }], 'policy: owners[0].match is not taken in owners: use contains'],
+      [[{ owner: 'data team', contains: [`${LEAK}`.repeat(11)] }], 'policy: owners[0].contains takes at most 8 strings of 1 to 64 characters']]) {
+      write(policy, { rules: [{ match: 'make\\s+release' }], owners })
+      const r = await check(t)
+      assert.equal(r.code, 0, why)
+      assert.equal(levelOf(r, 'policy'), 'warn')
+      assert.ok(textOf(r, 'policy').startsWith('your file: 12 of 12 built-in categories, 1 rule(s) of your own, 0 local and 0 production host pattern(s); ' +
+        `its owners cannot be used (${why}`), textOf(r, 'policy'))
+      assert.match(textOf(r, 'policy'), /\), so the hook asks without owner labels$/)
+      assert.equal(levelOf(r, 'asks'), 'ok')
+      assert.match(r.text, /vetobench replay --policy FILE/)
     }
 
     for (const content of [{ disable: ['push-to-main'] }, { ignore: ['origin'] }, { branches: [`${LEAK}-trunk`] }]) {

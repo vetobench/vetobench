@@ -185,7 +185,8 @@ test('hook install / uninstall: dry run, --write with a backup, every other byte
     assert.match(dry.stdout, /what --write would change/)
     assert.match(dry.stdout, /It holds 3 other setting\(s\) and 2 other hook\(s\); they stay as they are\./)
     assert.match(dry.stdout, /Would add: 1 PreToolUse hook \(matcher Bash\)/)
-    assert.match(dry.stdout, /Policy: your file .*12 of 12 built-in categories, 1 rule\(s\) of your own/)
+    assert.match(dry.stdout, /Policy: your file .*12 of 12 built-in categories, 1 rule\(s\) of your own, 0 local and 0 production host pattern\(s\)\.\n/)
+    assert.doesNotMatch(dry.stdout, /owner/, 'a policy without owners: the summary is as before')
     assert.equal(readFileSync(t.file, 'utf8'), SETTINGS, 'a dry run changes nothing')
     assert.deepEqual(backupDirs(t.home), [])
     noLeaks(dry.stdout, t)
@@ -255,6 +256,37 @@ test('hook install / uninstall: dry run, --write with a backup, every other byte
     assert.equal(none.status, 1)
     assert.match(none.stdout, /no vetobench hook there/)
     assert.equal(readFileSync(t.file, 'utf8'), SETTINGS)
+  } finally {
+    rmSync(t.dir, { recursive: true, force: true })
+  }
+})
+
+test('hook install with owners: the policy summary counts the owner entries, never their labels; the installed hook names the owner', () => {
+  const t = layout('{}\n')
+  try {
+    const policy = join(t.dir, 'policy.json')
+    writeFileSync(policy, JSON.stringify({ rules: [{ match: 'make\\s+release' }], owners: [
+      { owner: 'zzmark release manager', branches: ['main'] }, { owner: 'zzmark platform', categories: ['custom'] },
+      { owner: 'zzmark data team', hosts: ['db.*'] }] }))
+    const dry = cli(['install', '--policy', policy], t)
+    assert.equal(dry.status, 0, dry.stderr)
+    assert.match(dry.stdout, /Policy: your file .*12 of 12 built-in categories, 1 rule\(s\) of your own, 0 local and 0 production host pattern\(s\), 3 owner\(s\)\.\n/)
+    noLeaks(dry.stdout, t)
+    const bad = join(t.dir, 'bad.json')
+    writeFileSync(bad, JSON.stringify({ owners: [{ owner: 'zzmark: x', hosts: ['db'] }] }))
+    const refused = cli(['install', '--write', '--policy', bad], t)
+    assert.equal(refused.status, 1)
+    assert.match(refused.stdout, /The policy file cannot be used \(policy: owners\[0\]\.owner must be 1 to 40 characters/)
+    noLeaks(refused.stdout, t)
+    assert.equal(readFileSync(t.file, 'utf8'), '{}\n')
+
+    assert.equal(cli(['install', '--write', '--policy', policy], t).status, 0)
+    if (process.platform !== 'win32') {
+      const command = JSON.parse(readFileSync(t.file, 'utf8')).hooks.PreToolUse[0].hooks[0].command
+      const sh = (cmd) => JSON.parse(spawnSync('/bin/sh', ['-c', command], { input: JSON.stringify(payload(cmd)), encoding: 'utf8' }).stdout)
+      assert.equal(sh('git push origin main').hookSpecificOutput.permissionDecisionReason, 'vetobench policy: Push to a main branch (owner: zzmark release manager)')
+      assert.equal(sh('make release').hookSpecificOutput.permissionDecisionReason, "vetobench policy: Your policy file's own rules (owner: zzmark platform)")
+    }
   } finally {
     rmSync(t.dir, { recursive: true, force: true })
   }
