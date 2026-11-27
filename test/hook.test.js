@@ -39,7 +39,10 @@ test('hook: each built-in category asks with the documented PreToolUse output an
   const prod = compilePolicy({ prodHosts: ['api.example.internal'], rules: [{ match: 'make\\s+release' }] })
   assert.deepEqual(hookDecision(payload('curl -X DELETE https://api.example.internal/v1/users/1'), prod), ask('prod-api-write'))
   assert.deepEqual(hookDecision(payload('make release'), prod), ask('custom'))
-  const covered = new Set([...POSITIVES.map(([, c]) => c), 'prod-api-write', 'custom'])
+  // A command whose check throws (here a detector, injected through the policy object) is asked about, never let through.
+  const broken = { ...compilePolicy({}), detectors: [['push-to-main', () => { throw new RangeError('zzmark') }]] }
+  assert.deepEqual(hookDecision(payload('ls -la'), broken), ask('unchecked'))
+  const covered = new Set([...POSITIVES.map(([, c]) => c), 'prod-api-write', 'custom', 'unchecked'])
   assert.deepEqual([...covered].sort(), CATEGORIES.map(([k]) => k).sort(), 'every category has a case')
   // Two categories: one ask, labels in display order.
   assert.deepEqual(hookDecision(payload('npm publish && git push origin main')), ask('push-to-main', 'package-publish'))

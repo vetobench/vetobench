@@ -12,7 +12,7 @@ import { accessSync, chmodSync, closeSync, constants, existsSync, mkdirSync, ope
 import { createHash } from 'node:crypto'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CATEGORIES, DEFAULT_POLICY, askDecision, loadPolicy } from './replay.js'
+import { BUILT_IN, CATEGORIES, DEFAULT_POLICY, commandDecision, loadPolicy } from './replay.js'
 import { spliceAllow } from './fix.js'
 import { matchesBash, readManaged } from './doctor.js'
 import { managedDir } from './rules.js'
@@ -33,6 +33,8 @@ const BIN = fileURLToPath(new URL('../bin/vetobench.js', import.meta.url))
  * The hook's answer to one PreToolUse input: the object that makes Claude Code ask you, or null to stay silent (the
  * call then goes through your normal permission flow). The reason holds fixed category labels, never the command, and
  * ` (owner: <label>)` when an entry of the policy's owners selects the ask (a label compilePolicy restricts to a short name).
+ * A command whose check fails is asked about with the label "Command vetobench could not check" (commandDecision never
+ * throws), so only the setup (input, options, policy file) can make the hook fail open.
  */
 export function hookDecision(input, policy = DEFAULT_POLICY) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null
@@ -40,9 +42,9 @@ export function hookDecision(input, policy = DEFAULT_POLICY) {
   if (input.tool_name !== 'Bash') return null
   const command = input.tool_input?.command
   if (typeof command !== 'string' || !command.trim()) return null
-  if (policy.ignore.some((rx) => rx.test(command))) return null
-  const { categories, owner } = askDecision(command, policy)
-  if (!categories.length) return null
+  const decision = commandDecision(command, policy)
+  if (decision === null || !decision.categories.length) return null
+  const { categories, owner } = decision
   return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask',
     permissionDecisionReason: REASON_PREFIX + categories.map((k) => LABELS.get(k)).join('; ') + (owner === null ? '' : ` (owner: ${owner})`) } }
 }
@@ -76,7 +78,8 @@ export function readInput(stream, { limit = MAX_INPUT, timeoutMs = READ_TIMEOUT_
 /**
  * `vetobench hook run [--policy FILE]`: the text to print, '' for nothing. It never throws. Bad input, an unknown
  * option or a policy file that cannot be read all give '' (fail open), so a broken hook never blocks the agent. An
- * error in the policy's owners alone drops the owners: the hook still asks, without a label.
+ * error in the policy's owners alone drops the owners: the hook still asks, without a label. An error while checking
+ * the command itself is not a setup error: hookDecision asks, as a command vetobench could not check.
  */
 export async function runHook(argv, { stdin }) {
   try {
@@ -785,7 +788,7 @@ export function testHook({ home, cwd, project = false, env = process.env, platfo
       } else {
         const relative = !isAbsolute(shape.policy)
         const file = resolve(cwd, shape.policy)
-        const counts = (s) => `your file: ${s.categories} of ${CATEGORIES.length - 1} built-in categories, ` +
+        const counts = (s) => `your file: ${s.categories} of ${BUILT_IN} built-in categories, ` +
           `${num(s.rules)} rule(s) of your own, ${num(s.localHosts)} local and ${num(s.prodHosts)} production host pattern(s)` +
           `${s.owners ? `, ${num(s.owners)} owner(s)` : ''}${relative ? `; ${RELATIVE}` : ''}`
         try {
@@ -921,7 +924,7 @@ export function renderHook(plan, res, version) {
       lines.push(`${res?.ok ? 'Added' : 'Would add'}: 1 PreToolUse hook (matcher Bash). Before each shell command, Claude Code asks you`)
       lines.push('when the policy would ask: pushes to main, CI triggers, publishes, remote writes and the other replay categories.')
       const s = plan.policy?.summary
-      lines.push(s ? `Policy: your file (the hook reads it from its full path): ${s.categories} of ${CATEGORIES.length - 1} built-in categories, ` +
+      lines.push(s ? `Policy: your file (the hook reads it from its full path): ${s.categories} of ${BUILT_IN} built-in categories, ` +
         `${num(s.rules)} rule(s) of your own, ${num(s.localHosts)} local and ${num(s.prodHosts)} production host pattern(s)` +
         `${s.owners ? `, ${num(s.owners)} owner(s)` : ''}.`
         : `Policy: built-in (${DEFAULT_POLICY.summary.categories} categories). Add your own hosts and rules with --policy FILE.`)

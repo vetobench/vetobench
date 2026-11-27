@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CATEGORIES, DEFAULT_POLICY, askCategories, compilePolicy, segments, parseLabels, scanReplay, replayCommand, parseReplayArgs, asksPerDay } from '../src/replay.js'
+import { BUILT_IN, CATEGORIES, DEFAULT_POLICY, askCategories, compilePolicy, segments, parseLabels, scanReplay, replayCommand, parseReplayArgs, asksPerDay } from '../src/replay.js'
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'replay')
 // Built from parts so the publish guard's URL and IPv4 checks stay quiet on synthetic data.
@@ -153,7 +153,8 @@ test('policy rules are anchored at a command start unless anywhere; disable and 
   assert.deepEqual(asks('echo deploy.sh prod', p), [])
   assert.deepEqual(asks('cd x && MAKE RELEASE', p), ['ci-trigger'])
   assert.deepEqual(asks('gcloud run deploy api', p), [])
-  assert.equal(p.summary.categories, CATEGORIES.length - 2) // custom is not a detector; cloud-mutation is off
+  assert.equal(p.summary.categories, CATEGORIES.length - 3) // custom and unchecked are not detectors; cloud-mutation is off
+  assert.equal(BUILT_IN, CATEGORIES.length - 2)
   assert.deepEqual(p.summary.disabled, ['cloud-mutation'])
 })
 
