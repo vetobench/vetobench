@@ -13,6 +13,9 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BIN = join(ROOT, 'bin', 'vetobench.js')
 // Synthetic, hand-written transcripts: interactive, headless (claude -p, with a subagent), Agent SDK, no marker, an
 // unknown marker, and a resumed copy. Every command, path, prompt, reason, id and the unknown marker holds "zzleak".
+// Only two refusal codes in it were seen in tested runs (hook:PreToolUse, unknown). The others are hypothetical, built
+// from reading Claude Code 2.1.332's code: the compound "subcommands:bashMiss:no-rule-match+safetyCheck" (h5), the ask
+// rule "rule:userSettings" (h9), "asyncAgent" (i6), dontAsk's "mode" refusal (p3) and a hook's allow (h6).
 const FIXTURE = join(ROOT, 'test', 'fixtures', 'headless')
 const PROJECT = join(FIXTURE, '-home-zzleak-user-zzleak-project')
 // Strings that must never reach any output: planted markers, run-marker values, recorded codes and rule sources.
@@ -50,8 +53,16 @@ test('isNoApprover: the unanswered-ask shapes Claude Code 2.1.332 wrote in claud
   ]) assert.equal(isNoApprover(pd), false, JSON.stringify(pd))
 })
 
+// Tested on a headless refusal: hook:PreToolUse and unknown. Every other code here, and the compound form, is
+// hypothetical: built from reading Claude Code 2.1.332's code, not seen on a refusal.
 test('causeOf: fixed causes from the reason code; in a compound command the most specific part wins', () => {
   const c = (reasonCode, extra = {}) => causeOf({ decision: 'reject', source: 'config', reasonCode, ...extra })
+  // The order of precedence, one pair at a time: hook > ask rule > safety check > classifier > no rule.
+  assert.equal(c('subcommands:rule:userSettings+hook:PreToolUse'), 'hook')
+  assert.equal(c('subcommands:safetyCheck+rule:localSettings'), 'ask-rule')
+  assert.equal(c('subcommands:classifier:auto-mode:no-verdict+safetyCheck'), 'safety')
+  assert.equal(c('subcommands:bashMiss:no-rule-match+classifier:auto-mode:no-verdict'), 'classifier')
+  assert.equal(c('subcommands:permissionStreamClosed+bashMiss:no-rule-match'), 'no-rule')
   assert.equal(c('hook:PreToolUse'), 'hook')
   assert.equal(c('hook:tool.judge'), 'hook')
   assert.equal(c('rule:userSettings'), 'ask-rule')
@@ -85,6 +96,82 @@ test('runGate refines the card\'s gates: the same totals, with hooks and refusal
   assert.equal(runGate({ decision: 'accept', source: 'user_temporary' }, 'AskUserQuestion'), 'answer')
   assert.equal(runGate({ decision: 'reject', source: 'hook', reasonType: 'hook', reasonCode: 'hook:PreToolUse' }, 'Bash'), 'hook-rejected')
   assert.equal(runGate({ decision: 'reject', source: 'user_reject' }, 'Bash'), 'prompt-rejected')
+  // A hook is named by its source or by its reason type; either one alone is enough.
+  assert.equal(runGate({ decision: 'accept', source: 'hook' }, 'Bash'), 'hook')
+  assert.equal(runGate({ decision: 'accept', source: 'config', reasonType: 'hook' }, 'Bash'), 'hook')
+  assert.equal(runGate({ decision: 'reject', source: 'config', reasonType: 'hook' }, 'Bash'), 'hook-rejected')
+  assert.equal(runGate({ decision: 'reject', source: 'hook' }, 'Bash'), 'hook-rejected')
+})
+
+/** Write synthetic records as one transcript: [entrypoint, sessionId, permissionDecision, tool?] per tool call. */
+function writeCalls(file, calls, day = '2026-11-05') {
+  const lines = []
+  calls.forEach(([entrypoint, sessionId, pd, tool = 'Bash'], i) => {
+    const id = `${file.split('/').pop()}-${i}`
+    const base = { ...(entrypoint !== null && { entrypoint }), sessionId, timestamp: `${day}T00:00:${String(i).padStart(2, '0')}Z` }
+    lines.push({ ...base, type: 'assistant', message: { content: [{ type: 'tool_use', id, name: tool }] } })
+    lines.push({ ...base, type: 'user', permissionDecision: pd, message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } })
+  })
+  writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
+}
+
+test('reconciliation with the card, gate by gate, over every recorded shape', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vetobench-headless-'))
+  try {
+    const H = 'sdk-cli'
+    writeCalls(join(dir, 'all.jsonl'), [
+      [H, 'r', { decision: 'accept', source: 'config', reasonType: 'rule' }],
+      [H, 'r', { decision: 'accept', source: 'config', reasonType: 'subcommandResults' }],
+      [H, 'r', { decision: 'accept', source: 'config' }],
+      [H, 'r', { decision: 'accept', source: 'hook', reasonType: 'hook' }],
+      [H, 'r', { decision: 'accept', source: 'config', reasonType: 'mode' }],
+      [H, 'r', { decision: 'accept', source: 'config', reasonType: 'classifier' }],
+      [H, 'r', { decision: 'accept', source: 'user_temporary' }],
+      [H, 'r', { decision: 'accept', source: 'user_temporary' }, 'AskUserQuestion'],
+      [H, 'r', { decision: 'reject', source: 'user_reject' }],
+      [H, 'r', { decision: 'cancelled', source: 'user_abort' }],
+      [H, 'r', { decision: 'reject', source: 'config', reasonType: 'classifier', reasonCode: 'classifier:auto-mode' }],
+      [H, 'r', { decision: 'reject', source: 'config', reasonType: 'safetyCheck' }],
+      [H, 'r', { decision: 'reject', source: 'hook', reasonType: 'hook', reasonCode: 'hook:PreToolUse' }],
+      [H, 'r', { decision: 'reject', source: 'config', reasonType: 'mode', reasonCode: 'mode:dontAsk' }],
+      [H, 'r', { decision: 'reject', source: 'config', reasonCode: 'hook:PreToolUse' }],
+      [H, 'r', { decision: 'reject', source: 'config', reasonCode: 'unknown' }],
+      // The one shape that moves: the card reads its reasonCode as a safety-check block or a classifier block.
+      [H, 'r', { decision: 'reject', source: 'config', reasonCode: 'safetyCheck' }],
+      [H, 'r', { decision: 'reject', source: 'config', reasonCode: 'classifier' }],
+      [H, 'r', { decision: 'reject', source: 'config', reasonType: 'other' }],
+    ])
+    const card = (await scanAll(dir)).gates
+    const g = (await scanHeadless(dir)).runs.headless.gates
+    const c = (k) => card[k] || 0
+    assert.equal(g.static + g.hook, c('rule') + c('rules-compound') + c('static-other'))
+    assert.deepEqual([g.mode, g.classifier, g.prompt, g.answer], [c('mode'), c('classifier'), c('human'), c('answer')])
+    assert.equal(g['prompt-rejected'], c('human-rejected'))
+    assert.equal(g['prompt-rejected'], 2, 'your rejection and your cancel')
+    const blocks = ['no-approver', 'classifier-rejected', 'safety-rejected', 'hook-rejected', 'mode-rejected', 'rejected-other']
+    assert.equal(blocks.reduce((n, k) => n + g[k], 0), c('classifier-rejected') + c('safety-rejected') + c('rejected-other'))
+    assert.deepEqual([g['safety-rejected'], c('safety-rejected')], [1, 2], 'the bare safetyCheck code moves from the card\'s safety gate')
+    assert.deepEqual([g['classifier-rejected'], c('classifier-rejected')], [1, 2], 'the bare classifier code moves from the card\'s classifier gate')
+    assert.equal(g['no-approver'], 4)
+    assert.deepEqual([g['hook-rejected'], g['mode-rejected'], g['rejected-other']], [1, 1, 1])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a session whose decisions carry two run markers counts once, under its first, and as mixed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vetobench-headless-'))
+  try {
+    const ok = { decision: 'accept', source: 'config', reasonType: 'rule' }
+    writeCalls(join(dir, 'a.jsonl'), [['cli', 'm', ok], ['sdk-cli', 'm', ok], ['cli', 'n', ok]])
+    const h = await scanHeadless(dir)
+    assert.equal(h.sessions, 2)
+    assert.equal(h.mixedSessions, 1)
+    assert.deepEqual([h.runs.interactive.sessions, h.runs.interactive.decisions], [2, 2])
+    assert.deepEqual([h.runs.headless.sessions, h.runs.headless.decisions], [0, 1])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('scanHeadless: sessions and decisions by how they ran, refusals for want of an approver by cause and in subagents', async () => {
@@ -163,7 +250,7 @@ test('no output form leaks a command, path, prompt, reason, id, marker value or 
     assert.deepEqual(leaks(out), [], form)
   }
   assert.deepEqual(leaks(JSON.stringify(await scanAll(FIXTURE, { onDecision: () => {} }))), [], 'the card totals keep nothing new')
-  assert.match(outputs.cliText, /Refused because no one could approve: 5 \(1 inside subagents\)/)
+  assert.match(outputs.cliText, /Refused because no one could approve: 5 \(1 inside a subagent\)/)
   assert.match(outputs.cliText, /A hook asked\s+2/)
   assert.match(outputs.cliMd, /\| Headless \| 2 \| 15 \| 62\.5% \|/)
 })
@@ -212,10 +299,35 @@ test('the footer: fixed text, chosen by which counts are not zero', async () => 
     const all = meaning(await scanHeadless(FIXTURE))
     assert.match(all[0], /^A headless job silently loses these 5 actions/)
     assert.ok(all.some((l) => l.startsWith('2 of them came from a hook that asked')))
-    assert.ok(all.some((l) => l.startsWith('1 of them happened inside subagents')))
-    assert.ok(all.some((l) => l.startsWith('In interactive sessions, 1 action was refused')))
+    assert.ok(all.some((l) => l.startsWith('1 of them happened inside a subagent,')))
+    assert.ok(all.some((l) => l.startsWith('In interactive sessions, 1 action was refused because Claude Code had no way to ask you.')))
+    assert.ok(all.some((l) => l.startsWith('1 headless action was approved with the recorded reason "mode": the permission mode or the tool allow-list')))
+    assert.ok(!all.some((l) => /bypassPermissions|acceptEdits|background/.test(l)), 'no cause the records do not carry')
     assert.ok(all.some((l) => l.startsWith('2 sessions with 3 decisions carry no run marker vetobench knows')))
     for (const line of renderHeadless(await scanHeadless(FIXTURE), { version: VERSION }).split('\n')) assert.ok(line.length <= 130, line)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the footer for exactly one refusal is singular', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vetobench-headless-'))
+  try {
+    mkdirSync(join(dir, 'p', 's', 'subagents'), { recursive: true })
+    writeCalls(join(dir, 'p', 's', 'subagents', 'agent-1.jsonl'), [['sdk-cli', 's', { decision: 'reject', source: 'config', reasonCode: 'hook:PreToolUse' }]])
+    writeCalls(join(dir, 'p', 's.jsonl'), [['sdk-cli', 's', { decision: 'accept', source: 'config', reasonType: 'mode' }],
+      ['sdk-cli', 's', { decision: 'accept', source: 'config', reasonType: 'mode' }]])
+    const h = await scanHeadless(dir)
+    assert.deepEqual(meaning(h), [
+      'A headless job silently loses this action: no one sees a prompt, and the agent reads the refusal and carries on without it.',
+      'If the job needs it, allow it for that job only (an allow-rule in the settings it runs with, --allowedTools, or a file passed ' +
+        'with --settings), or run that task interactively.',
+      'It came from a hook that asked: in a headless run its ask is a refusal. Keep it where the job should never run those commands unattended.',
+      "It happened inside a subagent, where the main session sees only the subagent's report.",
+      '2 headless actions were approved with the recorded reason "mode": the permission mode or the tool allow-list, not a rule in ' +
+        'your settings or the classifier.',
+    ])
+    assert.match(renderHeadless(h, { version: VERSION }), /Refused because no one could approve: 1 \(1 inside a subagent\)/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

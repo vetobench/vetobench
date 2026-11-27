@@ -9,8 +9,9 @@ import { claudeVersions, num, pct } from './render.js'
 import { isDay } from './drift.js'
 
 /**
- * How a session ran, from the `entrypoint` field Claude Code writes on every transcript record (it holds
- * CLAUDE_CODE_ENTRYPOINT, which Claude Code sets at start). sdk-cli is `claude -p` (print mode); sdk-ts and sdk-py are
+ * How a session ran, from the `entrypoint` field Claude Code writes on every user and assistant record (it holds
+ * CLAUDE_CODE_ENTRYPOINT, which Claude Code sets at start; bookkeeping records such as queue-operation or
+ * file-history-snapshot carry none, and decisions sit on user records). sdk-cli is `claude -p` (print mode); sdk-ts and sdk-py are
  * the Agent SDKs; Claude Code itself treats those three as SDK sessions and leaves them out of the /resume list.
  * claude-code-github-action is the GitHub Action. cli is the terminal app; claude-vscode and claude-desktop are the IDE
  * extension and the desktop app, which show permission prompts. Any other value, or none, is unknown: never guessed.
@@ -75,8 +76,9 @@ const SAFETY_CODES = new Set(['safetyCheck', 'outsideReadsBlocked', 'outsideWrit
  * True for a refusal because no one could approve: a permission prompt that would have been shown, in a run that
  * cannot show one. Claude Code records such an unanswered ask as decision "reject", source "config", no reasonType,
  * and the ask's reasonCode (tested with 2.1.332 in `claude -p`: "hook:PreToolUse" for a hook's ask, "unknown" when no
- * rule allowed the call). Where its code avoids prompts by design (a background agent, "no approval surface in this
- * session"), it records reasonType "asyncAgent" instead; that one has not been seen in a transcript yet.
+ * rule allowed the call): five records from two setups. Where its code has no way to ask ("Permission prompts are not
+ * available in this context", "no approval surface in this session"), it records reasonType "asyncAgent" instead; that
+ * one comes from reading Claude Code's code and has not been seen in a transcript.
  */
 export function isNoApprover(pd) {
   if (!pd || typeof pd !== 'object' || pd.decision !== 'reject' || pd.source !== 'config') return false
@@ -215,21 +217,26 @@ export function meaning(h) {
   if (!hl.decisions) {
     out.push('No headless run left a recorded decision here, so nothing was refused for want of an approver.')
   } else if (na.total) {
-    out.push(`A headless job silently loses these ${s(na.total, 'action')}: no one sees a prompt, and the agent reads the refusal ` +
-      'and carries on without them.')
-    out.push('If the job needs them, allow them for that job only (an allow-rule in the settings it runs with, --allowedTools, ' +
+    const one = na.total === 1
+    const it = one ? 'it' : 'them'
+    out.push(`A headless job silently loses ${one ? 'this action' : `these ${num(na.total)} actions`}: no one sees a prompt, and the ` +
+      `agent reads the refusal and carries on without ${it}.`)
+    out.push(`If the job needs ${it}, allow ${it} for that job only (an allow-rule in the settings it runs with, --allowedTools, ` +
       'or a file passed with --settings), or run that task interactively.')
-    if (na.byCause.hook) out.push(`${num(na.byCause.hook)} of them came from a hook that asked: in a headless run its ask is a refusal. ` +
-      'Keep it where the job should never run those commands unattended.')
-    if (na.inSubagents) out.push(`${num(na.inSubagents)} of them happened inside subagents, where the main session sees only the subagent's report.`)
+    if (na.byCause.hook) out.push(`${one ? 'It' : `${num(na.byCause.hook)} of them`} came from a hook that asked: in a headless run ` +
+      'its ask is a refusal. Keep it where the job should never run those commands unattended.')
+    if (na.inSubagents) out.push(`${one ? 'It' : `${num(na.inSubagents)} of them`} happened inside ` +
+      `${na.inSubagents === 1 ? 'a subagent' : 'subagents'}, where the main session sees only the subagent's report.`)
   } else {
     out.push('No headless action was refused for want of an approver in this window.')
   }
-  if (hl.gates.mode) out.push(`${s(hl.gates.mode, 'headless action')} ran on the permission mode alone (such as bypassPermissions ` +
-    'or acceptEdits), not on a rule or the classifier.')
+  // The record says only "mode": the permission mode or the tool allow-list let the call run. Which mode is not recorded.
+  const m = hl.gates.mode
+  if (m) out.push(`${s(m, 'headless action')} ${m === 1 ? 'was' : 'were'} approved with the recorded reason "mode": the permission ` +
+    'mode or the tool allow-list, not a rule in your settings or the classifier.')
   const ia = h.runs.interactive.noApprover.total
-  if (ia) out.push(`In interactive sessions, ${s(ia, 'action')} ${ia === 1 ? 'was' : 'were'} refused because no prompt could be ` +
-    'shown for ' + (ia === 1 ? 'it' : 'them') + ' (as in a background subagent).')
+  if (ia) out.push(`In interactive sessions, ${s(ia, 'action')} ${ia === 1 ? 'was' : 'were'} refused because Claude Code had no ` +
+    'way to ask you.')
   if (h.runs.unknown.decisions) out.push(`${s(h.runs.unknown.sessions, 'session')} with ${s(h.runs.unknown.decisions, 'decision')} ` +
     'carry no run marker vetobench knows, so they are counted as unknown, not guessed.')
   return out
@@ -262,7 +269,8 @@ export function renderHeadless(h, { version } = {}) {
     for (const [label, n] of rows) out.push(`  ${label.padEnd(gw)}  ${num(n).padStart(9)}  ${pct(n, hl.decisions).padStart(7)}`)
     const na = hl.noApprover
     out.push('')
-    out.push(`Refused because no one could approve: ${num(na.total)}${na.total ? ` (${num(na.inSubagents)} inside subagents)` : ''}`)
+    out.push(`Refused because no one could approve: ${num(na.total)}` +
+      (na.total ? ` (${num(na.inSubagents)} inside ${na.inSubagents === 1 ? 'a subagent' : 'subagents'})` : ''))
     const causes = CAUSES.filter(([k]) => na.byCause[k])
     const cw = Math.max(0, ...causes.map(([, label]) => label.length))
     for (const [k, label] of causes) out.push(`  ${label.padEnd(cw)}  ${num(na.byCause[k]).padStart(9)}`)
@@ -333,10 +341,10 @@ Usage: npx vetobench headless [transcripts-dir] [--since YYYY-MM-DD] [--until YY
   --md              the tables as markdown, to paste into an issue
 
 Splits your sessions into interactive and headless (claude -p, the Agent SDK, the GitHub Action) by the run marker
-Claude Code writes on each record. For the headless ones: who approved each action (static rules, the permission
-mode, the AI classifier, a hook), and how many actions were refused because a prompt would have been shown and no
-one was there to answer it, by cause (a hook asked, no rule allowed it, ...), and how many of those were inside
-subagents. Sessions without a known marker are counted as unknown.
+Claude Code writes on its user and assistant records. For the headless ones: who approved each action (static
+rules, the permission mode, the AI classifier, a hook), and how many actions were refused because a prompt would
+have been shown and no one was there to answer it, by cause (a hook asked, no rule allowed it, ...), and how many
+of those were inside subagents. Sessions without a known marker are counted as unknown.
 Reads files on this machine and prints counts. Nothing is sent anywhere.`
 }
 

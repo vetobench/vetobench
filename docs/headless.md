@@ -6,7 +6,7 @@ More and more coding agents run headless: `claude -p` in a script or a cron job,
 
 `vetobench headless` does:
 
-- **How your sessions ran.** Sessions with a recorded decision, split into interactive, headless and unknown by the run marker Claude Code writes on every transcript record (see [The run marker](#the-run-marker)), with their decisions and a one-line comparison: the static-rule share, the classifier share, the prompts you answered, and the refusals for want of an approver.
+- **How your sessions ran.** Sessions with a recorded decision, split into interactive, headless and unknown by the run marker Claude Code writes on every user and assistant record (see [The run marker](#the-run-marker)), with their decisions and a one-line comparison: the static-rule share, the classifier share, the prompts you answered, and the refusals for want of an approver.
 - **Who decided in headless sessions.** Static allow-rules, the permission mode, the AI classifier, a hook, a prompt answered by the program running the agent, and every kind of refusal.
 - **Refused because no one could approve.** The calls that would have shown a permission prompt, by cause: a hook asked, an ask rule matched, a safety check asked, the classifier gave no verdict, no rule allowed it. Also how many of them were inside subagents.
 - **What this means.** A few lines of fixed text, chosen by which counts are not zero: what a refusal costs a headless job, and what to do about it.
@@ -51,7 +51,7 @@ In headless sessions (Claude Code 2.1.331 to 2.1.332), who decided:
   Blocked by the AI classifier                       1     6.7%
   Refused by the permission mode                     1     6.7%
 
-Refused because no one could approve: 5 (1 inside subagents)
+Refused because no one could approve: 5 (1 inside a subagent)
   A hook asked                  2
   An ask rule matched           1
   A safety check asked          1
@@ -64,11 +64,10 @@ What this means:
     or a file passed with --settings), or run that task interactively.
   2 of them came from a hook that asked: in a headless run its ask is a refusal. Keep it where the job should
     never run those commands unattended.
-  1 of them happened inside subagents, where the main session sees only the subagent's report.
-  1 headless action ran on the permission mode alone (such as bypassPermissions or acceptEdits), not on a rule or
-    the classifier.
-  In interactive sessions, 1 action was refused because no prompt could be shown for it (as in a background
-    subagent).
+  1 of them happened inside a subagent, where the main session sees only the subagent's report.
+  1 headless action was approved with the recorded reason "mode": the permission mode or the tool allow-list, not
+    a rule in your settings or the classifier.
+  In interactive sessions, 1 action was refused because Claude Code had no way to ask you.
   2 sessions with 3 decisions carry no run marker vetobench knows, so they are counted as unknown, not guessed.
 
 Counts only: no command, path, prompt or marker value is printed. Nothing left this machine.
@@ -80,24 +79,24 @@ Counts only: no command, path, prompt or marker value is printed. Nothing left t
 
 ### The run marker
 
-Every transcript record Claude Code writes carries an `entrypoint` field. It holds `CLAUDE_CODE_ENTRYPOINT`, which Claude Code sets when it starts, unless the program that started it already did: `cli` for the terminal app, `sdk-cli` in print mode (`claude -p`; in print mode a preset `cli` becomes `sdk-cli` too), `claude-code-github-action` when `CLAUDE_CODE_ACTION` is set, and `mcp` for `claude mcp serve`. Its code names `sdk-ts` and `sdk-py` for the TypeScript and Python Agent SDKs, and it treats `sdk-cli`, `sdk-ts` and `sdk-py` as SDK sessions: it leaves them out of the `/resume` list. All of this was read in Claude Code 2.1.332's own code; the `claude -p` runs below recorded `sdk-cli` on every record.
+Every user and assistant record Claude Code writes carries an `entrypoint` field; permission decisions sit on user records. Bookkeeping records (such as `queue-operation`, `last-prompt`, `permission-mode`, `ai-title` or `file-history-snapshot`) carry none. The field holds `CLAUDE_CODE_ENTRYPOINT`, which Claude Code sets when it starts, unless the program that started it already did: `cli` for the terminal app, `sdk-cli` in print mode (`claude -p`; in print mode a preset `cli` becomes `sdk-cli` too), `claude-code-github-action` when `CLAUDE_CODE_ACTION` is set, and `mcp` for `claude mcp serve`. Its code names `sdk-ts` and `sdk-py` for the TypeScript and Python Agent SDKs, and it treats `sdk-cli`, `sdk-ts` and `sdk-py` as SDK sessions: it leaves them out of the `/resume` list. All of this was read in Claude Code 2.1.332's own code; the `claude -p` runs below recorded `sdk-cli` on every user and assistant record.
 
-| `entrypoint` | Counted as | Seen in a transcript |
+| `entrypoint` | Counted as | Basis |
 |---|---|---|
-| `cli` | Interactive | yes |
-| `claude-vscode`, `claude-desktop` (the VS Code extension and the desktop app, which show prompts) | Interactive | no |
-| `sdk-cli` (`claude -p`) | Headless | yes |
-| `sdk-ts`, `sdk-py` (the Agent SDKs) | Headless | no |
-| `claude-code-github-action` (set when `CLAUDE_CODE_ACTION` is) | Headless | no |
+| `cli` | Interactive | Claude Code's code: the value when it does not run in print mode |
+| `claude-vscode`, `claude-desktop` (the VS Code extension and the desktop app, which show prompts) | Interactive | Claude Code's code (its list of entrypoints); not tested |
+| `sdk-cli` (`claude -p`) | Headless | tested: the `claude -p` runs below |
+| `sdk-ts`, `sdk-py` (the Agent SDKs) | Headless | Claude Code's code; not tested |
+| `claude-code-github-action` (set when `CLAUDE_CODE_ACTION` is) | Headless | Claude Code's code; not tested |
 | any other value (`mcp`, the `remote` family, `local-agent`, ...) or no field | Unknown | |
 
 - **Per record.** Each decision is classified by the marker on its own record, never by a neighbour's. A record without a known marker is counted as unknown, not guessed. `--json` splits unknown into `noMarker` and `otherMarker`.
-- **Sessions.** A session is a session id; a subagent's records carry the id of the session that started it, so a subagent belongs to its main session. A record with no session id counts its transcript as the session. A session is counted once, under the run kind of its first counted decision; `mixedSessions` in `--json` counts sessions whose later decisions carry another kind (none on the author's machine).
-- **Versions.** The run marker is on every record of every Claude Code version left on the author's machine (2.1.306 to 2.1.332; older transcripts were deleted by retention), and only `cli` and `sdk-cli` occur there. Permission decisions are recorded from about 2.1.306, so a decision without a marker is not expected from Claude Code: it most likely comes from a transcript written or edited by another tool.
+- **Sessions.** A session is a session id; a subagent's records carry the id of the session that started it, so a subagent belongs to its main session. A record with no session id counts its transcript as the session. A session is counted once, under the run kind of its first counted decision; `mixedSessions` in `--json` counts sessions whose later decisions carry another kind.
+- **Versions.** The tested runs used Claude Code 2.1.332. Permission decisions are recorded from about 2.1.306; whether every version since then writes the marker was not tested. A decision record without one is counted as unknown.
 
 ### Refused because no one could approve
 
-When Claude Code would show a permission prompt and the run cannot show one, it records the call as `"decision": "reject"`, `"source": "config"`, **no** `reasonType`, and a `reasonCode` that says why it would have asked. This is what vetobench counts as "Refused: no one could approve". Blocks that carry a `reasonType` (the classifier, a safety check, a hook's deny, the permission mode) are not prompts, and they are counted as their own gates.
+In the tested runs, when Claude Code would have shown a permission prompt and the run could not show one, it recorded the call as `"decision": "reject"`, `"source": "config"`, **no** `reasonType`, and a `reasonCode` that says why it would have asked. vetobench counts every record of that shape as "Refused: no one could approve" (see [Limits](#limits) for how few records this rests on). Blocks that carry a `reasonType` (the classifier, a safety check, a hook's deny, the permission mode) are counted as their own gates.
 
 Tested on 2026-11-26 and 2026-11-27 with Claude Code 2.1.332: headless `claude -p` runs with the settings passed through `--settings` and `--setting-sources local`, each asking the agent to create a file in an empty folder, with the transcript kept. The ask hook was the same stub as in [docs/hook.md](hook.md#what-was-tested-in-claude-code).
 
@@ -113,27 +112,33 @@ The tool result is an error that holds the hook's reason or Claude Code's "needs
 
 From Claude Code 2.1.332's own code, not yet seen in a transcript:
 
-- **Where Claude Code avoids prompts by design** (a background agent, or "no approval surface in this session"), it denies an ask with `reasonType: "asyncAgent"` (and the ask's `reasonCode`). vetobench counts it as refused because no one could approve, in whatever run it happens. In an interactive session, the footer reports these on a line of their own.
+- **Where Claude Code has no way to ask** (its own reasons read "Permission prompts are not available in this context" and "no approval surface in this session"), it denies an ask with `reasonType: "asyncAgent"` (and the ask's `reasonCode`). vetobench counts it as refused because no one could approve, in whatever run it happens. In an interactive session, the footer reports these on a line of their own.
 - **A hook that answers `"deny"`** is recorded with `source` and `reasonType` `"hook"`: "Blocked by a hook". A hook that answers `"allow"` is "A hook allowed it". The card counts both under its other static and other blocked gates.
 - **`dontAsk` mode** refuses what would ask with `reasonType: "mode"`: "Refused by the permission mode". It is listed apart, because you chose that mode, but the job loses the action just the same.
 - **An answer from the program running the agent** (the Agent SDK's `canUseTool` callback, or `--permission-prompt-tool`) is recorded with a `user_*` source, like your own answer at a prompt. In a headless session it is labelled "Answered through the SDK or a prompt tool", because it is not you at a terminal (it may be a person in that program's own interface).
 
 ### Causes
 
-The `reasonCode` of a refusal for want of an approver gives its cause. A compound shell command records `subcommands:` and the codes of its parts joined by `+`; the most specific part wins, in the order of this table. The code itself is never printed.
+The `reasonCode` of a refusal for want of an approver gives its cause. Only two codes were seen on a refusal in the tested runs: `hook:PreToolUse` and `unknown`. Every other code in this table, and the compound form, comes from reading Claude Code 2.1.332's code (the function that builds `reasonCode`). A compound shell command records `subcommands:` and the codes of its parts joined by `+`; the most specific part wins, in the order of this table. The code itself is never printed.
 
-| Cause | `reasonCode` |
-|---|---|
-| A hook asked | `hook:…` (`hook:PreToolUse`) |
-| An ask rule matched | `rule:…` (an ask rule in `permissions.ask`, by the settings file it came from) |
-| A safety check asked | `safetyCheck`, `workingDir`, `outsideReadsBlocked`, `outsideWritesBlocked`, `noConfigHome`, `sandboxOverride`, or a `circuitBreaker` field (a sensitive file, a path outside the working folders) |
-| The AI classifier gave no verdict | `classifier:…` (auto mode could not decide, so it would have asked) |
-| No rule allowed it | `unknown`, `mode:…`, `bashMiss:…`, `subcommandResults` |
-| Other | anything else |
+| Cause | `reasonCode` | Seen on a headless refusal |
+|---|---|---|
+| A hook asked | `hook:…` | `hook:PreToolUse`: tested |
+| An ask rule matched | `rule:…` (an ask rule in `permissions.ask`, by the settings file it came from) | no: Claude Code's code |
+| A safety check asked | `safetyCheck`, `workingDir`, `outsideReadsBlocked`, `outsideWritesBlocked`, `noConfigHome`, `sandboxOverride`, or a `circuitBreaker` field (a sensitive file, a path outside the working folders) | no: Claude Code's code |
+| The AI classifier gave no verdict | `classifier:…` (auto mode could not decide, so it would have asked) | no: Claude Code's code |
+| No rule allowed it | `unknown`, `mode:…`, `bashMiss:…`, `subcommandResults` | `unknown`: tested; the others from Claude Code's code |
+| Other | anything else | |
 
 ### Who decided
 
-The gates refine the card's (see [METHODOLOGY.md](../METHODOLOGY.md#gates)). Static allow-rules are the card's three static gates without hook approvals; the refusals for want of an approver, hook blocks and permission-mode refusals come out of the card's "Blocked, other". Over the same window the gates add up to the card's totals; a test checks it.
+The gates refine the card's (see [METHODOLOGY.md](../METHODOLOGY.md#gates)). Over the same window:
+
+- **Approvals match gate for gate,** except that hook approvals are split out: static allow-rules plus "A hook allowed it" equal the card's three static gates. The permission mode, the classifier, the prompts answered ("You", or "Answered through the SDK or a prompt tool") and the answers to the agent's questions equal the card's.
+- **"Rejected at a permission prompt"** equals the card's "Rejected or cancelled by you".
+- **The other blocks add up to the card's blocks, but one gate can move.** The card reads `reasonType`, and `reasonCode` when there is none, so a reject from `config` with no `reasonType` and a `reasonCode` of exactly `safetyCheck` or `classifier` is "Blocked by a safety check" or "Blocked by the AI classifier" on the card, and "Refused: no one could approve" here. Apart from that, the refusals for want of an approver, hook blocks and permission-mode refusals come out of the card's "Blocked, other".
+
+A test checks each of these.
 
 ### Inside subagents
 
@@ -142,8 +147,10 @@ As on the card, a decision is inside a subagent when it is in a subagent's own t
 ## Limits
 
 - **Only runs that keep a transcript.** `claude -p --no-session-persistence` (and an SDK app that turns persistence off) writes none, so those runs are invisible. A CI runner's transcripts live on the runner and are gone with it: run `npx vetobench headless --json` as a step in the job to see them.
-- **Not every marker value was seen.** On the author's machine only `cli` and `sdk-cli` occur. The other values in the table come from Claude Code's own list and were not tested, and Claude Code can add or rename values in any release. An unknown value is counted, never guessed.
+- **Only `sdk-cli` was tested.** The other values in the marker table come from Claude Code's own code, and Claude Code can add or rename values in any release. An unknown value is counted, never guessed.
+- **The refusal rule rests on few records.** "A reject from `config` with no `reasonType` is an unanswered ask" rests on five records from two setups (a hook's ask, three times; no rule, for a Bash and a Write call), all on Claude Code 2.1.332. The other causes come from reading its code. If Claude Code records the unanswered ask of a safety check or of the classifier with a `reasonType`, vetobench counts it as "Blocked by a safety check" or "Blocked by the AI classifier" instead, so the refusals for want of an approver may be undercounted.
 - **The fields are undocumented.** `permissionDecision` and its `reasonCode` can change without notice. The shapes above were tested on one version (2.1.332).
+- **"Permission mode" says what the record says.** An approval recorded with the reason `mode` was let through by the permission mode or the tool allow-list. The decision record does not say which mode, and Claude Code's code records approvals in the default mode that way too.
 - **A refusal is not a failed job.** The agent may find another way, or the task may not have needed the action. vetobench counts refusals, not lost work.
 - **Headless is not the same as unattended.** An app built on the Agent SDK can show its own prompts through `canUseTool`; those answers count as "Answered through the SDK or a prompt tool".
 - **Approvals given in chat do not appear,** just as on the card.
