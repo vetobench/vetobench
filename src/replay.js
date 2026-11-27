@@ -22,8 +22,9 @@ export const CATEGORIES = [
   ['unchecked', 'Command vetobench could not check'],
 ]
 
-/** The category of a command whose check failed: the parser threw, or the command went past one of its limits, or a
- * rule or ignore pattern of the policy threw on it. It is asked about, with no other category and no owner. Not a
+/** The category of a command whose check failed or was not complete: the parser threw or went past one of its limits,
+ * a rule or ignore pattern of the policy threw on it, or part of the check was left out (an expansion or assignment past
+ * a variable bound, or rules on a command too long for them) and nothing else asked. Its asks have no owner. Not a
  * detector: a policy cannot switch it off, add rules to it or give it an owner. */
 export const UNCHECKED = 'unchecked'
 const unchecked = () => ({ categories: [UNCHECKED], owner: null })
@@ -31,9 +32,11 @@ const unchecked = () => ({ categories: [UNCHECKED], owner: null })
 // ---- Shell parsing. Approximate by design: it reads text, never runs it, and errs towards seeing a command. ----
 
 // The parser reads text the agent writes, and the hook has seconds before Claude Code gives up on it and runs the
-// command unchecked. So every string it builds and every loop it runs is bounded by a count. Past a limit that could
-// hide a command, it gives up and the command is asked about as UNCHECKED; past one that cannot hide more than a
-// variable's value (expansion, variables), it leaves the text as written.
+// command unchecked. So every string it builds and every loop it runs is bounded by a count. Past a structural limit
+// (nesting, commands, heredocs, text read) it gives up, and the command is asked about as UNCHECKED. Past a variable
+// bound (expansion, variables) it leaves the reference as written, checks the rest, and marks the command incomplete:
+// the value it did not expand could be the whole command, a branch or a verb, so an incomplete command that nothing
+// else asks about is asked about as UNCHECKED too.
 /** Levels of nesting: $( ), <( ), backticks, bash -c, eval, an ssh remote command, a heredoc fed to a shell or ssh. */
 export const MAX_DEPTH = 12
 /** Characters read for one command line: the line, each part of it parsed again as a command of its own, and each
@@ -45,12 +48,17 @@ export const MAX_SEGMENTS = 10000
 export const MAX_HEREDOCS = 1024
 export const MAX_DELIMITER = 64
 /** $NAME expansion makes one word at most this many characters longer than written, and adds at most MAX_EXPANSION
- * characters to one command line in all; a reference that would go past either stays as written. */
+ * characters to one command line in all; a reference that would go past either stays as written (incomplete). */
 export const MAX_WORD_EXPANSION = 4096
 export const MAX_EXPANSION = 65536
 /** Variables tracked by one command line (and by each ssh remote command, which has its own): an assignment to a further
- * name is not recorded, so references to it stay as written. */
+ * name is not recorded (incomplete), so references to it stay as written. */
 export const MAX_VARS = 256
+/** The policy's own regular expressions run only on text up to this many characters: rules on the command with heredoc
+ * bodies cut out, ignore patterns on the whole command. Longer, rules are left out (incomplete) and ignore patterns
+ * skip nothing. A regular expression cannot be stopped once it runs, and a simple one can still take a long time on a
+ * long run of blanks or of `NAME=value;`. */
+export const MAX_PATTERN_TEXT = 64 * 1024
 
 /** Thrown when a command line goes past a limit that could hide a command from the detectors. */
 class ParseLimit extends Error {}
@@ -65,7 +73,8 @@ const isWord = (c) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= 
  * it is the input when it feeds ssh, a shell or a SQL client. The rest of the opening line stays (it may pipe on).
  * The cuts are those of the expression /<<-?[ \t]*(['"]?)(\w+)\1([^\n]*)\n([\s\S]*?)\n[ \t]*\2[ \t]*(?=\n|$)/g, each
  * match replaced with `<<${HD}<n>` and the rest of its opening line (an unquoted delimiter that is never closed tries
- * its shorter prefixes, as that expression backtracks). They are found in linear time: a line can close only the
+ * its shorter prefixes, as that expression backtracks), except that the `<<` of a here-string `<<<` opens nothing (the
+ * expression took `<<<WORD` for a heredoc). They are found in linear time: a line can close only the
  * heredoc whose delimiter it holds, so those lines are indexed first. Past MAX_HEREDOCS heredocs, or with a delimiter
  * longer than MAX_DELIMITER, the command is not checked.
  */
@@ -120,8 +129,9 @@ function cutHeredocs(cmd) {
     const w0 = q + quote.length
     let w = w0
     while (w < n && isWord(cmd[w])) w++
-    // The opening line ends at the first line break after the delimiter, whichever prefix of it is the delimiter.
-    const nl = w > w0 && (!quote || cmd[w] === quote) ? lineBreak(w) : -1
+    // The opening line ends at the first line break after the delimiter, whichever prefix of it is the delimiter. A `<<`
+    // right after a `<` is the end of a here-string's `<<<`, not a heredoc (where the expression did take it for one).
+    const nl = w > w0 && (!quote || cmd[w] === quote) && cmd[p - 1] !== '<' ? lineBreak(w) : -1
     let end = -1
     if (nl >= 0) {
       if (++heredocs > MAX_HEREDOCS || w - w0 > MAX_DELIMITER) giveUp()
@@ -261,7 +271,8 @@ const VAR = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g
 /**
  * Expand $NAME / ${NAME} set earlier in the same command line, so `DB=…; psql "$DB"` is seen. Unknown names stay, and so
  * does a reference that would make the word more than MAX_WORD_EXPANSION characters longer than written, or the command
- * line's expansions more than MAX_EXPANSION characters in all (work.expanded counts them).
+ * line's expansions more than MAX_EXPANSION characters in all (work.expanded counts them); such a reference marks the
+ * command incomplete (work.incomplete).
  */
 function expand(s, vars, work) {
   if (!s.includes('$')) return s
@@ -271,7 +282,10 @@ function expand(s, vars, work) {
     const value = vars[a || b]
     const more = value.length - m.length
     if (more > 0) {
-      if (grown + more > MAX_WORD_EXPANSION || work.expanded + more > MAX_EXPANSION) return m
+      if (grown + more > MAX_WORD_EXPANSION || work.expanded + more > MAX_EXPANSION) {
+        work.incomplete = true
+        return m
+      }
       grown += more
       work.expanded += more
     }
@@ -281,13 +295,14 @@ function expand(s, vars, work) {
 
 /** A table of variables: { vars, size }. */
 const newScope = () => ({ vars: {}, size: 0 })
-/** Record an assignment, unless it names a new variable and the table already holds MAX_VARS. */
-function setVar(scope, name, value) {
+/** Record an assignment, unless it names a new variable and the table already holds MAX_VARS: that marks the command
+ * incomplete. */
+function setVar(scope, name, value, work) {
   if (Object.hasOwn(scope.vars, name)) scope.vars[name] = value
   else if (scope.size < MAX_VARS) {
     scope.vars[name] = value
     if (Object.hasOwn(scope.vars, name)) scope.size += 1 // `__proto__=…` sets nothing, as it never did
-  }
+  } else work.incomplete = true
 }
 
 const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{'])
@@ -338,14 +353,14 @@ function emit(words, redirects, ctx, out, depth) {
   if (++ctx.work.segments > MAX_SEGMENTS) giveUp()
   const { env, sudo, rest } = unwrap(words, ctx)
   if (!rest.length) {
-    for (const k of Object.keys(env)) setVar(ctx.scope, k, env[k])
+    for (const k of Object.keys(env)) setVar(ctx.scope, k, env[k], ctx.work)
     return
   }
   const prog = base(rest[0])
   if (DECLARE.has(prog)) {
     for (const w of rest.slice(1)) {
       const m = ASSIGN.exec(w)
-      if (m) setVar(ctx.scope, m[1], expand(w.slice(m[0].length), ctx.scope.vars, ctx.work))
+      if (m) setVar(ctx.scope, m[1], expand(w.slice(m[0].length), ctx.scope.vars, ctx.work), ctx.work)
     }
     return
   }
@@ -407,13 +422,15 @@ function nested(seg, ctx, out, depth) {
   }
 }
 
-/** Parse one command line. work counts against the limits: characters read, simple commands, characters expanded. Throws
- * (ParseLimit) past a limit that could hide a command. */
+/** Parse one command line: { text, segs, incomplete }. work counts against the limits (characters read, simple commands,
+ * characters expanded) and notes a reference or assignment left out past a variable bound (incomplete). Throws
+ * (ParseLimit) past a structural limit. */
 function parseCommand(command) {
   const { text, bodies } = cutHeredocs(String(command ?? ''))
   const segs = []
-  parse(text, { bodies, scope: newScope(), host: null, sudo: false, work: { read: 0, segments: 0, expanded: 0 } }, segs, 0)
-  return { text, segs }
+  const work = { read: 0, segments: 0, expanded: 0, incomplete: false }
+  parse(text, { bodies, scope: newScope(), host: null, sudo: false, work }, segs, 0)
+  return { text, segs, incomplete: work.incomplete }
 }
 
 /** Simple commands in a shell command line, after heredoc bodies are cut out: { prog, args, env, sudo, host, redirects, stdin }.
@@ -975,7 +992,9 @@ function ownerOf(owners, categories, found, text) {
  *
  * It never throws. When checking the command fails (it goes past a parser limit, the parser throws, or one of the
  * policy's rules does), the answer is an ask with the one category UNCHECKED and no owner: an error while checking one
- * command never lets it pass silently.
+ * command never lets it pass silently. When the check was incomplete (a variable bound left a reference or an
+ * assignment out, or the text was too long for the policy's rules), the categories that did match are the answer, and
+ * UNCHECKED with no owner when none did.
  */
 export function askDecision(command, policy = DEFAULT_POLICY) {
   try {
@@ -987,11 +1006,12 @@ export function askDecision(command, policy = DEFAULT_POLICY) {
 
 /**
  * askDecision for a command the policy's ignore patterns may skip: null when one of them matches it. It never throws: an
- * ignore pattern that throws gives the UNCHECKED ask too.
+ * ignore pattern that throws gives the UNCHECKED ask too. A command longer than MAX_PATTERN_TEXT is not tested against
+ * them, so none skips it.
  */
 export function commandDecision(command, policy = DEFAULT_POLICY) {
   try {
-    if (policy.ignore.some((rx) => rx.test(command))) return null
+    if (String(command ?? '').length <= MAX_PATTERN_TEXT && policy.ignore.some((rx) => rx.test(command))) return null
   } catch {
     return unchecked()
   }
@@ -999,7 +1019,10 @@ export function commandDecision(command, policy = DEFAULT_POLICY) {
 }
 
 function decide(command, policy) {
-  const { text, segs } = parseCommand(command)
+  const { text, segs, incomplete: partial } = parseCommand(command)
+  // The policy's rules run only on text up to MAX_PATTERN_TEXT characters; past it they are left out.
+  const rules = text.length <= MAX_PATTERN_TEXT ? policy.rules : []
+  const incomplete = partial || rules.length < policy.rules.length
   const owners = String(command ?? '').length <= MAX_OWNER_COMMAND ? policy.owners ?? [] : []
   // Per category hit: the hosts and protected branches its simple commands target (collected only for owners), at most
   // MAX_OWNER_DISTINCT distinct ones of each for the whole command, in the order the detectors meet them.
@@ -1017,8 +1040,10 @@ function decide(command, policy) {
       if (name === 'push-to-main') for (const b of protectedPushes(s, policy)) if (comparable(b) && keep(seenBranches, b)) f.branches.add(b)
     }
   }
-  for (const r of policy.rules) if (r.rx.test(text)) at(r.category)
+  for (const r of rules) if (r.rx.test(text)) at(r.category)
   const categories = CATEGORIES.map(([k]) => k).filter((k) => found.has(k))
+  // Part of the check was left out and nothing else asked: the part left out could have, so ask as UNCHECKED.
+  if (incomplete && !categories.length) return unchecked()
   return { categories, owner: owners.length && categories.length ? ownerOf(owners, categories, found, text) : null }
 }
 

@@ -2,14 +2,18 @@
 // start. Every command here is synthetic.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
-import { CATEGORIES, MAX_DELIMITER, MAX_DEPTH, MAX_EXPANSION, MAX_HEREDOCS, MAX_PARSED, MAX_SEGMENTS, MAX_VARS, MAX_WORD_EXPANSION,
-  UNCHECKED, askCategories, askDecision, commandDecision, compilePolicy, heredocCuts, renderReplay, replayCommand, scanReplay,
-  segments } from '../src/replay.js'
+import { fileURLToPath } from 'node:url'
+import { CATEGORIES, MAX_DELIMITER, MAX_DEPTH, MAX_EXPANSION, MAX_HEREDOCS, MAX_PARSED, MAX_PATTERN_TEXT, MAX_SEGMENTS, MAX_VARS,
+  MAX_WORD_EXPANSION, UNCHECKED, askCategories, askDecision, commandDecision, compilePolicy, heredocCuts, renderReplay, replayCommand,
+  scanReplay, segments } from '../src/replay.js'
 import { REASON_PREFIX, hookDecision, runHook } from '../src/hook.js'
+
+const BIN = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'vetobench.js')
 
 const LABEL = new Map(CATEGORIES)
 const ask = (...keys) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask',
@@ -57,10 +61,74 @@ test('expansion is bounded per word and per command line, and variables per tabl
   const names = Array.from({ length: MAX_VARS + 1 }, (_, i) => `V${i}`)
   const segs = segments(`${names.map((n) => `${n}=v`).join('; ')}; echo $V0 $V${MAX_VARS - 1} $V${MAX_VARS}; V0=w; echo $V0`)
   assert.deepEqual(segs.map((s) => s.args), [['v', 'v', `$V${MAX_VARS}`], ['w']])
-  // A host left as a reference is not known, so it counts as production, as a host set outside the command does.
-  assert.deepEqual(askCategories(`${names.map((n) => `${n}=v`).join('; ')}; H=db.example.internal; psql -h $H -c "DELETE FROM t"`), ['remote-sql-write'])
-  assert.deepEqual(askCategories(`${names.map((n) => `${n}=v`).join('; ')}; H=db.example.internal; psql -h $H -c "DELETE FROM t"`,
-    compilePolicy({ unknownIsProd: false })), [])
+  // A host left as a reference is not known, so it counts as production, as a host set outside the command does; and
+  // when nothing asks (here unknown hosts are not production), the left-out assignment makes it an UNCHECKED ask.
+  const sql = `${names.map((n) => `${n}=v`).join('; ')}; H=db.example.internal; psql -h $H -c "DELETE FROM t"`
+  assert.deepEqual(askCategories(sql), ['remote-sql-write'])
+  assert.deepEqual(askCategories(sql, compilePolicy({ unknownIsProd: false })), [UNCHECKED])
+})
+
+// Two ways to leave a value out: 256 variables first (the next one is not recorded), or the expansion budget spent first.
+const FULL_TABLE = Array.from({ length: MAX_VARS }, (_, i) => `J${i}=1`).join('; ') + '; '
+const SPENT = `P=${'p'.repeat(MAX_WORD_EXPANSION + 2)}; ${'echo $P; '.repeat(MAX_EXPANSION / MAX_WORD_EXPANSION)}`
+
+test('a value left out past a variable bound never lets the command pass silently: hook run asks', () => {
+  const repros = [`${FULL_TABLE}B=main; git push origin $B`, `${SPENT}C='git push origin main'; eval "$C"`]
+  for (const cmd of repros) {
+    // The same commands without the bound ask about the push: the value was the branch, or the whole command.
+    assert.deepEqual(askCategories(cmd.replace(FULL_TABLE, '').replace(SPENT, '')), ['push-to-main'])
+    const r = spawnSync(process.execPath, [BIN, 'hook', 'run'], { input: JSON.stringify(payload(cmd)), encoding: 'utf8' })
+    assert.deepEqual([r.status, r.stderr], [0, ''])
+    assert.deepEqual(JSON.parse(r.stdout), ask(UNCHECKED))
+  }
+  for (const tail of ['V=publish; npm $V', 'C=apply; terraform $C', 'V=delete; kubectl --context prod $V pod x', 'A=merge; gh pr $A 3',
+    `C='git push origin main'; bash -c "$C"`]) {
+    assert.notDeepEqual(askCategories(tail), [], tail)
+    assert.deepEqual(askDecision(FULL_TABLE + tail), { categories: [UNCHECKED], owner: null }, tail)
+    assert.deepEqual(askDecision(SPENT + tail), { categories: [UNCHECKED], owner: null }, tail)
+  }
+  // What did match still wins: the doubling chain leaves values out, and the push after it is asked about as such.
+  assert.deepEqual(askCategories(DOUBLING), ['push-to-main'])
+  assert.deepEqual(askCategories(`${FULL_TABLE}B=main; npm publish; git push origin $B`), ['package-publish'])
+  // Nothing left out, nothing asked: silent as before.
+  assert.deepEqual(askCategories(`${SPENT.slice(0, -'echo $P; '.length)}ls`), [])
+})
+
+test('the policy\'s own patterns run only on text up to MAX_PATTERN_TEXT: past it, rules are left out and ignore skips nothing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vetobench-limits-'))
+  try {
+    const write = (name, raw) => { const f = join(dir, name); writeFileSync(f, JSON.stringify(raw)); return f }
+    const spaces = write('spaces.json', { rules: [{ match: String.raw`\s*zzz` }] })
+    const literal = write('literal.json', { rules: [{ match: String.raw`deploy\.sh` }] })
+    const run = async (command, file) => {
+      const [out, ms] = await (async () => {
+        const t0 = process.hrtime.bigint()
+        const o = await runHook(['--policy', file], { stdin: () => Readable.from([JSON.stringify(payload(command))]) })
+        return [o, Number(process.hrtime.bigint() - t0) / 1e6]
+      })()
+      assert.ok(ms < 1000, `${ms} ms for ${command.length} characters`)
+      return out === '' ? null : JSON.parse(out)
+    }
+    // A long run of blanks before a rule that begins with \s*: a built-in category that matches wins; with none, the rules
+    // left out make it an UNCHECKED ask.
+    assert.deepEqual(await run(' '.repeat(150000) + 'git push origin main', spaces), ask('push-to-main'))
+    assert.deepEqual(await run(' '.repeat(150000) + 'ls', spaces), ask(UNCHECKED))
+    // NAME=value; repeated inside a comment, which the anchor retries from every `;`, even for a rule of plain text.
+    assert.deepEqual(await run('# ' + 'A=1; '.repeat(40000) + '\nls', literal), ask(UNCHECKED))
+    // Under the bound, the rules run as before; without rules, a long command is checked as before.
+    assert.deepEqual(await run('deploy.sh prod', literal), ask('custom'))
+    assert.deepEqual(askCategories(' '.repeat(MAX_PATTERN_TEXT + 1) + 'ls'), [])
+    // Rules on the command with heredoc bodies cut out: a long body does not count.
+    const body = `cat > notes.md <<'EOF'\n${'x '.repeat(MAX_PATTERN_TEXT)}\nEOF\ndeploy.sh prod`
+    assert.deepEqual(askCategories(body, compilePolicy({ rules: [{ match: String.raw`deploy\.sh` }] })), ['custom'])
+    // Ignore patterns skip only commands up to the bound; a longer one is checked (and asked about if it asks).
+    const ignoring = compilePolicy({ ignore: ['zzskip'] })
+    assert.equal(commandDecision('git push origin main # zzskip', ignoring), null)
+    assert.deepEqual(commandDecision('git push origin main # zzskip' + ' '.repeat(MAX_PATTERN_TEXT), ignoring), { categories: ['push-to-main'], owner: null })
+    assert.deepEqual(commandDecision('ls # zzskip' + ' '.repeat(MAX_PATTERN_TEXT), ignoring), { categories: [], owner: null })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('past a parser limit that could hide a command, the command is asked about as one vetobench could not check', () => {
@@ -238,27 +306,38 @@ test('fuzz: hostile pieces (doublings, self-naming heredocs, deep nesting, scrip
 
 // ---- Heredocs: the same cuts as the regular expression they were cut with, in linear time ----
 
-const HEREDOC = /<<-?[ \t]*(['"]?)(\w+)\1([^\n]*)\n([\s\S]*?)\n[ \t]*\2[ \t]*(?=\n|$)/g
-function regexCuts(cmd) {
+const BODY = String.raw`<<-?[ \t]*(['"]?)(\w+)\1([^\n]*)\n([\s\S]*?)\n[ \t]*\2[ \t]*(?=\n|$)`
+/** The cuts the expression made; with notAfterLt, without the `<<` that ends a here-string's `<<<` (the one intended change). */
+function regexCuts(cmd, notAfterLt = true) {
   const bodies = []
-  const text = cmd.replace(HEREDOC, (_m, _q, _tag, rest, body) => `<<__vb_heredoc_${bodies.push(body) - 1}${rest}`)
+  const text = cmd.replace(new RegExp((notAfterLt ? '(?<!<)' : '') + BODY, 'g'), (_m, _q, _tag, rest, body) => `<<__vb_heredoc_${bodies.push(body) - 1}${rest}`)
   return { text, bodies }
 }
 
-test('heredocs are cut exactly as the regular expression cut them, also on shapes that made it slow', () => {
+test('heredocs are cut exactly as the regular expression cut them (but for here-strings), also on shapes that made it slow', () => {
   const edges = [
     'cat <<EOF\nbody\nEOF', 'cat <<EOF\nEOF\nx\nEOF', 'cat <<EOF\n\nEOF', 'cat <<EOFX\nbody\nEOF\n', "cat <<'EOF' > f\nk=v\nEOF\nnext",
     'cat <<"E"\n"x"\n E \n', 'cat <<-\tEOF\n\tx\n\tEOF', 'cat <<<EOF\nx\nEOF', 'cat <<A <<B\na\nA\nb\nB', 'cat <<EOF\r\nx\r\nEOF\r\n',
     "cat <<'EOF\nx\nEOF", 'x $((1<<2))\ny', 'cat <<EOF', 'cat <<EOF\nnever closed', 'a <<E1\n<<E2\nE2\nE1', '<<\n\n', 'cat << EOF\nx\nEOF ',
+    'cat <<<<EOF\nx\nEOF', 'tr a b <<<x <<EOF\ny\nEOF',
   ]
   for (const cmd of edges) assert.deepEqual(heredocCuts(cmd), regexCuts(cmd), JSON.stringify(cmd))
+  // The here-string is the one change: `<<<EOF` opened a heredoc for the expression, and opens none now.
+  assert.deepEqual(heredocCuts('cat <<<EOF\nx\nEOF'), { text: 'cat <<<EOF\nx\nEOF', bodies: [] })
+  assert.notDeepEqual(regexCuts('cat <<<EOF\nx\nEOF', false), heredocCuts('cat <<<EOF\nx\nEOF'))
   const r = rng(11)
   const ALPHA = ['<<', '<<-', '<<<', '<', ' ', '\t', "'", '"', 'E', 'EO', 'EOF', 'A', '_', '1', '\n', '\n', '\n', 'x', ';', '\r', '-', 'EOF\n', '\nEOF', ' EOF ']
   for (let i = 0; i < 20000; i++) {
     let s = ''
     for (let j = 1 + Math.floor(r() * 120); j > 0; j--) s += ALPHA[Math.floor(r() * ALPHA.length)]
     assert.deepEqual(heredocCuts(s), regexCuts(s), JSON.stringify(s))
+    // Without three `<` in a row, the very expression main had.
+    if (!s.includes('<<<')) assert.deepEqual(heredocCuts(s), regexCuts(s, false), JSON.stringify(s))
   }
+  // Here-strings neither count as heredocs nor carry a delimiter.
+  assert.deepEqual(askCategories(`base64 -d <<<${'A'.repeat(MAX_DELIMITER + 6)}\nls`), [])
+  assert.deepEqual(askCategories(`echo "<<<${'b'.repeat(MAX_DELIMITER + 6)}"\nls`), [])
+  assert.deepEqual(askCategories(Array(MAX_HEREDOCS + 76).fill('cat <<<hi').join('\n') + '\ngit push origin main'), ['push-to-main'])
   // Many heredocs that never close, ahead of a long tail: each made the expression read the whole tail again.
   const unclosed = Array.from({ length: MAX_HEREDOCS }, (_, i) => `cat <<T${i}`).join('\n') + '\n' + '#\n'.repeat(100000) + 'git push origin main'
   const [cats, ms] = timed(() => askCategories(unclosed))
