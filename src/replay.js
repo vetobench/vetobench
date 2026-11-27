@@ -19,20 +19,128 @@ export const CATEGORIES = [
   ['cloud-mutation', 'Cloud resource change'],
   ['prod-api-write', 'Write request to a production API'],
   ['custom', "Your policy file's own rules"],
+  ['unchecked', 'Command vetobench could not check'],
 ]
+
+/** The category of a command whose check failed: the parser threw, or the command went past one of its limits, or a
+ * rule or ignore pattern of the policy threw on it. It is asked about, with no other category and no owner. Not a
+ * detector: a policy cannot switch it off, add rules to it or give it an owner. */
+export const UNCHECKED = 'unchecked'
+const unchecked = () => ({ categories: [UNCHECKED], owner: null })
 
 // ---- Shell parsing. Approximate by design: it reads text, never runs it, and errs towards seeing a command. ----
 
-const MAX_DEPTH = 12
-const HD = '__vb_heredoc_'
-/** Heredoc bodies are data (notes, files being written), so they are cut out before matching. Each body is kept aside:
- * it is the input when it feeds ssh, a shell or a SQL client. The rest of the opening line stays (it may pipe on). */
-const HEREDOC = /<<-?[ \t]*(['"]?)(\w+)\1([^\n]*)\n([\s\S]*?)\n[ \t]*\2[ \t]*(?=\n|$)/g
+// The parser reads text the agent writes, and the hook has seconds before Claude Code gives up on it and runs the
+// command unchecked. So every string it builds and every loop it runs is bounded by a count. Past a limit that could
+// hide a command, it gives up and the command is asked about as UNCHECKED; past one that cannot hide more than a
+// variable's value (expansion, variables), it leaves the text as written.
+/** Levels of nesting: $( ), <( ), backticks, bash -c, eval, an ssh remote command, a heredoc fed to a shell or ssh. */
+export const MAX_DEPTH = 12
+/** Characters read for one command line: the line, each part of it parsed again as a command of its own, and each
+ * heredoc body handed to a command. */
+export const MAX_PARSED = 16 * 1024 * 1024
+/** Simple commands (assignments included) in one command line, nested ones included. */
+export const MAX_SEGMENTS = 10000
+/** Heredocs (`<<` with a delimiter and then a line break) in one command line, and the longest delimiter. */
+export const MAX_HEREDOCS = 1024
+export const MAX_DELIMITER = 64
+/** $NAME expansion makes one word at most this many characters longer than written, and adds at most MAX_EXPANSION
+ * characters to one command line in all; a reference that would go past either stays as written. */
+export const MAX_WORD_EXPANSION = 4096
+export const MAX_EXPANSION = 65536
+/** Variables tracked by one command line (and by each ssh remote command, which has its own): an assignment to a further
+ * name is not recorded, so references to it stay as written. */
+export const MAX_VARS = 256
 
+/** Thrown when a command line goes past a limit that could hide a command from the detectors. */
+class ParseLimit extends Error {}
+const giveUp = () => { throw new ParseLimit('vetobench: parser limit') }
+
+const HD = '__vb_heredoc_'
+const isBlank = (c) => c === ' ' || c === '\t'
+const isWord = (c) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_'
+
+/**
+ * Heredoc bodies are data (notes, files being written), so they are cut out before matching. Each body is kept aside:
+ * it is the input when it feeds ssh, a shell or a SQL client. The rest of the opening line stays (it may pipe on).
+ * The cuts are those of the expression /<<-?[ \t]*(['"]?)(\w+)\1([^\n]*)\n([\s\S]*?)\n[ \t]*\2[ \t]*(?=\n|$)/g, each
+ * match replaced with `<<${HD}<n>` and the rest of its opening line (an unquoted delimiter that is never closed tries
+ * its shorter prefixes, as that expression backtracks). They are found in linear time: a line can close only the
+ * heredoc whose delimiter it holds, so those lines are indexed first. Past MAX_HEREDOCS heredocs, or with a delimiter
+ * longer than MAX_DELIMITER, the command is not checked.
+ */
 function cutHeredocs(cmd) {
+  const n = cmd.length
+  // Lines after the first that hold one word between blanks, by that word: their starts, in order.
+  const closers = new Map()
+  for (let s = cmd.indexOf('\n') + 1; s > 0;) {
+    const nl = cmd.indexOf('\n', s)
+    let a = s
+    let b = nl < 0 ? n : nl
+    while (a < b && isBlank(cmd[a])) a++
+    while (b > a && isBlank(cmd[b - 1])) b--
+    if (b > a && b - a <= MAX_DELIMITER) {
+      let w = a
+      while (w < b && isWord(cmd[w])) w++
+      if (w === b) {
+        const word = cmd.slice(a, b)
+        const at = closers.get(word)
+        if (at) at.push(s)
+        else closers.set(word, [s])
+      }
+    }
+    s = nl + 1
+  }
+  const lengths = [...new Set([...closers.keys()].map((k) => k.length))].sort((x, y) => y - x)
+  const next = new Map()
+  /** The start of the first line after position `after` that closes `tag`; -1 for none. `after` never decreases. */
+  const closer = (tag, after) => {
+    const at = closers.get(tag)
+    if (!at) return -1
+    let i = next.get(tag) ?? 0
+    while (i < at.length && at[i] <= after) i++
+    next.set(tag, i)
+    return i < at.length ? at[i] : -1
+  }
+  // The first line break at or after a position; positions asked about never decrease, so each break is passed once.
+  let lineEnd = -2
+  const lineBreak = (from) => {
+    if (lineEnd === -2 || (lineEnd >= 0 && lineEnd < from)) lineEnd = cmd.indexOf('\n', from)
+    return lineEnd
+  }
   const bodies = []
-  const text = cmd.replace(HEREDOC, (_m, _q, _tag, rest, body) => `<<${HD}${bodies.push(body) - 1}${rest}`)
-  return { text, bodies }
+  const parts = []
+  let last = 0
+  let heredocs = 0
+  for (let p = cmd.indexOf('<<'); p >= 0;) {
+    let q = p + 2
+    if (cmd[q] === '-') q++
+    while (isBlank(cmd[q])) q++
+    const quote = cmd[q] === "'" || cmd[q] === '"' ? cmd[q] : ''
+    const w0 = q + quote.length
+    let w = w0
+    while (w < n && isWord(cmd[w])) w++
+    // The opening line ends at the first line break after the delimiter, whichever prefix of it is the delimiter.
+    const nl = w > w0 && (!quote || cmd[w] === quote) ? lineBreak(w) : -1
+    let end = -1
+    if (nl >= 0) {
+      if (++heredocs > MAX_HEREDOCS || w - w0 > MAX_DELIMITER) giveUp()
+      for (const len of quote ? [w - w0] : lengths) {
+        if (len > w - w0) continue
+        // The closing line must start after a line break that is itself after the opening line's.
+        const s = closer(cmd.slice(w0, w0 + len), nl + 1)
+        if (s < 0) continue
+        const e = cmd.indexOf('\n', s)
+        parts.push(cmd.slice(last, p), `<<${HD}${bodies.length}`, cmd.slice(w0 + len + quote.length, nl))
+        bodies.push(cmd.slice(nl + 1, s - 1))
+        last = end = e < 0 ? n : e
+        break
+      }
+    }
+    p = cmd.indexOf('<<', end < 0 ? p + 1 : end)
+  }
+  parts.push(cmd.slice(last))
+  return { text: parts.join(''), bodies }
 }
 
 const base = (w) => w.slice(w.lastIndexOf('/') + 1)
@@ -66,7 +174,7 @@ function backtick(src, i) {
 /** Split src into simple commands (pushed to out). Unquoted ; & | newlines and parentheses end one; $( ), <( ), backticks,
  * `bash -c`, `eval`, ssh remote commands and heredocs fed to a shell are parsed as commands of their own. */
 function parse(src, ctx, out, depth) {
-  if (depth > MAX_DEPTH) return
+  if (depth > MAX_DEPTH || (ctx.work.read += src.length) > MAX_PARSED) giveUp()
   let words = []
   let redirects = []
   let word = ''
@@ -150,8 +258,37 @@ function parse(src, ctx, out, depth) {
 
 const ASSIGN = /^([A-Za-z_][A-Za-z0-9_]*)=/
 const VAR = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g
-/** Expand $NAME / ${NAME} set earlier in the same command line, so `DB=…; psql "$DB"` is seen. Unknown names stay. */
-const expand = (s, vars) => (s.includes('$') ? s.replace(VAR, (m, a, b) => (Object.hasOwn(vars, a || b) ? vars[a || b] : m)) : s)
+/**
+ * Expand $NAME / ${NAME} set earlier in the same command line, so `DB=…; psql "$DB"` is seen. Unknown names stay, and so
+ * does a reference that would make the word more than MAX_WORD_EXPANSION characters longer than written, or the command
+ * line's expansions more than MAX_EXPANSION characters in all (work.expanded counts them).
+ */
+function expand(s, vars, work) {
+  if (!s.includes('$')) return s
+  let grown = 0
+  return s.replace(VAR, (m, a, b) => {
+    if (!Object.hasOwn(vars, a || b)) return m
+    const value = vars[a || b]
+    const more = value.length - m.length
+    if (more > 0) {
+      if (grown + more > MAX_WORD_EXPANSION || work.expanded + more > MAX_EXPANSION) return m
+      grown += more
+      work.expanded += more
+    }
+    return value
+  })
+}
+
+/** A table of variables: { vars, size }. */
+const newScope = () => ({ vars: {}, size: 0 })
+/** Record an assignment, unless it names a new variable and the table already holds MAX_VARS. */
+function setVar(scope, name, value) {
+  if (Object.hasOwn(scope.vars, name)) scope.vars[name] = value
+  else if (scope.size < MAX_VARS) {
+    scope.vars[name] = value
+    if (Object.hasOwn(scope.vars, name)) scope.size += 1 // `__proto__=…` sets nothing, as it never did
+  }
+}
 
 const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{'])
 /** Programs that run the next word as the command. The letters are their options that take a value. */
@@ -168,7 +305,7 @@ function unwrap(words, ctx) {
   while (i < words.length) {
     const w = words[i]
     const m = ASSIGN.exec(w)
-    if (m) { env[m[1]] = expand(w.slice(m[0].length), ctx.vars); i++; continue }
+    if (m) { env[m[1]] = expand(w.slice(m[0].length), ctx.scope.vars, ctx.work); i++; continue }
     if (KEYWORDS.has(w)) { i++; continue }
     const b = base(w)
     const valued = WRAPPERS.get(b)
@@ -183,27 +320,37 @@ function unwrap(words, ctx) {
   return { env, sudo, rest: words.slice(i) }
 }
 
+/** The input a command reads: a here-string, or a heredoc body (which counts towards MAX_PARSED each time it is handed
+ * on, as the text typed can name one body many times). */
 function stdinOf(redirects, ctx) {
   for (const r of redirects) {
     if (r.op === '<<<') return r.target
-    if (r.op === '<<' && r.target.startsWith(HD)) return ctx.bodies[Number(r.target.slice(HD.length))] ?? null
+    if (r.op === '<<' && r.target.startsWith(HD)) {
+      const body = ctx.bodies[Number(r.target.slice(HD.length))] ?? null
+      if (body !== null && (ctx.work.read += body.length) > MAX_PARSED) giveUp()
+      return body
+    }
   }
   return null
 }
 
 function emit(words, redirects, ctx, out, depth) {
+  if (++ctx.work.segments > MAX_SEGMENTS) giveUp()
   const { env, sudo, rest } = unwrap(words, ctx)
-  if (!rest.length) { Object.assign(ctx.vars, env); return }
+  if (!rest.length) {
+    for (const k of Object.keys(env)) setVar(ctx.scope, k, env[k])
+    return
+  }
   const prog = base(rest[0])
   if (DECLARE.has(prog)) {
     for (const w of rest.slice(1)) {
       const m = ASSIGN.exec(w)
-      if (m) ctx.vars[m[1]] = expand(w.slice(m[0].length), ctx.vars)
+      if (m) setVar(ctx.scope, m[1], expand(w.slice(m[0].length), ctx.scope.vars, ctx.work))
     }
     return
   }
-  const vars = { ...ctx.vars, ...env }
-  const args = rest.slice(1).map((a) => expand(a, vars))
+  const vars = { ...ctx.scope.vars, ...env }
+  const args = rest.slice(1).map((a) => expand(a, vars, ctx.work))
   const seg = { prog, args, env: vars, sudo, host: ctx.host, redirects, stdin: stdinOf(redirects, ctx) }
   out.push(seg)
   nested(seg, ctx, out, depth)
@@ -254,22 +401,26 @@ function nested(seg, ctx, out, depth) {
     const { dest, command } = prog === 'ssh' ? sshParts(args) : gcloudSshParts(args)
     if (!dest) return
     // The remote shell re-parses the joined words; local variables were already expanded into them.
-    const remote = { bodies: ctx.bodies, vars: {}, host: dest, sudo: false }
+    const remote = { bodies: ctx.bodies, scope: newScope(), host: dest, sudo: false, work: ctx.work }
     if (command) parse(command, remote, out, depth + 1)
     if (seg.stdin !== null && (!command || SHELLS.has(base(command.trim().split(/\s+/)[0])))) parse(seg.stdin, remote, out, depth + 1)
   }
 }
 
+/** Parse one command line. work counts against the limits: characters read, simple commands, characters expanded. Throws
+ * (ParseLimit) past a limit that could hide a command. */
 function parseCommand(command) {
   const { text, bodies } = cutHeredocs(String(command ?? ''))
   const segs = []
-  parse(text, { bodies, vars: {}, host: null, sudo: false }, segs, 0)
+  parse(text, { bodies, scope: newScope(), host: null, sudo: false, work: { read: 0, segments: 0, expanded: 0 } }, segs, 0)
   return { text, segs }
 }
 
 /** Simple commands in a shell command line, after heredoc bodies are cut out: { prog, args, env, sudo, host, redirects, stdin }.
- * host is the ssh destination a command runs on, null when local. Exported for tests. */
+ * host is the ssh destination a command runs on, null when local. Throws past a parser limit. Exported for tests. */
 export const segments = (command) => parseCommand(command).segs
+/** The heredoc cuts of a command line: { text, bodies }. Throws past a parser limit. Exported for tests. */
+export const heredocCuts = (command) => cutHeredocs(String(command ?? ''))
 
 // ---- Argument helpers ----
 
@@ -304,11 +455,23 @@ const has = (args, flag) => args.some((a) => a === flag || a.startsWith(flag + '
 const LOCAL = [/^localhost$/, /\.localhost$/, /^127(\.\d{1,3}){3}$/, /^::1$/, /^0\.0\.0\.0$/, /^host\.docker\.internal$/,
   /^(kind|k3d)-/, /^(minikube|docker-desktop|docker-for-desktop|rancher-desktop|orbstack|microk8s)$/, /^colima/]
 
+/**
+ * s cut at the first of chars that has no line break after it: what s.replace(/[<chars>].*$/, '') gives (`.` stops at
+ * a line break), in linear time. That expression starts again from each of those characters and reads to the line
+ * break each time, so on a crafted word of many slashes and one line break it took time in the square of its length.
+ */
+function cutTail(s, chars) {
+  let from = 0
+  for (const t of ['\n', '\r', ' ', ' ']) from = Math.max(from, s.lastIndexOf(t) + 1)
+  for (let i = from; i < s.length; i++) if (chars.includes(s[i])) return s.slice(0, i)
+  return s
+}
+
 /** Host part of user@host:port, ssh://host, [v6]:port or a URL. */
 function hostOf(target) {
   let h = String(target).trim().toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '').replace(/^[^@/]*@/, '')
   if (h.startsWith('[')) return h.slice(1, h.includes(']') ? h.indexOf(']') : undefined)
-  h = h.replace(/[/?#].*$/, '')
+  h = cutTail(h, '/?#')
   return h.split(':').length === 2 ? h.slice(0, h.indexOf(':')) : h
 }
 
@@ -355,7 +518,7 @@ const ghWords = (s) => (s.prog === 'gh' || s.prog === 'glab' ? positionals(s.arg
 function ghApiPath(s) {
   if (s.prog !== 'gh') return ''
   const at = s.args.indexOf('api')
-  return at < 0 ? '' : (positionals(s.args.slice(at + 1), GH_API_VALUED)[0] ?? '').replace(/[?#].*$/, '')
+  return at < 0 ? '' : cutTail(positionals(s.args.slice(at + 1), GH_API_VALUED)[0] ?? '', '?#')
 }
 
 function prMerge(s) {
@@ -373,7 +536,7 @@ function ciTrigger(s) {
       (g[0] === 'release' && g[1] === 'create') || (g[0] === 'api' && DISPATCH.test(ghApiPath(s)))
   }
   if (s.prog === 'glab') return (g[0] === 'ci' || g[0] === 'pipeline') && ['run', 'retry', 'trigger'].includes(g[1])
-  return HTTP_CLIENTS.has(s.prog) && s.args.some((a) => /^https?:\/\//.test(a) && DISPATCH.test(a.replace(/[?#].*$/, '')))
+  return HTTP_CLIENTS.has(s.prog) && s.args.some((a) => /^https?:\/\//.test(a) && DISPATCH.test(cutTail(a, '?#')))
 }
 
 function repoSecret(s) {
@@ -566,12 +729,20 @@ const DETECTORS = [
   ['remote-sql-write', remoteSqlWrite], ['k8s-write', k8sWrite], ['infra-apply', infraApply],
   ['cloud-mutation', cloudMutation], ['prod-api-write', prodApiWrite],
 ]
+/** How many built-in categories a policy can switch on and off. */
+export const BUILT_IN = DETECTORS.length
 
 // ---- Policy ----
 
-/** Where a policy rule's `match` must start unless it says "anywhere": the start of a shell command (start of text or line,
- * or after ; & | ( or $( ), behind VAR=value prefixes, sudo, timeout or command. Same anchor as the research prototype. */
-const CMD_START = String.raw`(?:^|\n|[;&|(]|\$\()\s*(?:(?:do|then|else)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:(?:sudo|timeout\s+\d+[smh]?|command)\s+)?`
+/**
+ * Where a policy rule's `match` must start unless it says "anywhere": the start of a shell command (start of text or line,
+ * or after ; & | ( or $( ), behind VAR=value prefixes, sudo, timeout or command. The research prototype's anchor, with
+ * one change that matches the same commands: its blanks are [^\S\n] (whitespace but a line break) where it had \s. A line
+ * break is itself a start, so whatever matched across one also matches from it; but blanks that could span lines let
+ * the anchor and a rule that begins with \s*, .* or [\s\S]* share a run of line breaks in very many ways from each start.
+ * (The \s between timeout and its seconds stays: what follows a line break there is the seconds, not a command.)
+ */
+const CMD_START = String.raw`(?:^|\n|[;&|(]|\$\()[^\S\n]*(?:(?:do|then|else)[^\S\n]+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*[^\S\n]+)*(?:(?:sudo|timeout\s+\d+[smh]?|command)[^\S\n]+)?`
 const POLICY_FIELDS = ['disable', 'rules', 'ignore', 'localHosts', 'prodHosts', 'branches', 'remoteIsProd', 'unknownIsProd', 'owners']
 const RULE_FIELDS = ['category', 'match', 'flags', 'anywhere']
 const OWNER_FIELDS = ['owner', 'hosts', 'branches', 'categories', 'contains']
@@ -716,7 +887,7 @@ export function compilePolicy(raw = {}, { dropBadOwners = false } = {}) {
     return v
   }
   const builtin = DETECTORS.map(([k]) => k)
-  const names = CATEGORIES.map(([k]) => k)
+  const names = CATEGORIES.map(([k]) => k).filter((k) => k !== UNCHECKED)
   const disable = strings('disable')
   if (disable.some((d) => !builtin.includes(d))) throw new Error(`policy: disable takes built-in category names (${builtin.join(', ')})`)
   if (raw.rules !== undefined && !Array.isArray(raw.rules)) throw new Error('policy: rules must be a list')
@@ -801,8 +972,33 @@ function ownerOf(owners, categories, found, text) {
  * in display order, empty when the policy lets it run. owner is the label of the first owners entry that selects the
  * ask, or null (always null without an ask: an owner never makes one, and for a command over MAX_OWNER_COMMAND
  * characters). The categories are worked out first and do not depend on the owners.
+ *
+ * It never throws. When checking the command fails (it goes past a parser limit, the parser throws, or one of the
+ * policy's rules does), the answer is an ask with the one category UNCHECKED and no owner: an error while checking one
+ * command never lets it pass silently.
  */
 export function askDecision(command, policy = DEFAULT_POLICY) {
+  try {
+    return decide(command, policy)
+  } catch {
+    return unchecked()
+  }
+}
+
+/**
+ * askDecision for a command the policy's ignore patterns may skip: null when one of them matches it. It never throws: an
+ * ignore pattern that throws gives the UNCHECKED ask too.
+ */
+export function commandDecision(command, policy = DEFAULT_POLICY) {
+  try {
+    if (policy.ignore.some((rx) => rx.test(command))) return null
+  } catch {
+    return unchecked()
+  }
+  return askDecision(command, policy)
+}
+
+function decide(command, policy) {
   const { text, segs } = parseCommand(command)
   const owners = String(command ?? '').length <= MAX_OWNER_COMMAND ? policy.owners ?? [] : []
   // Per category hit: the hosts and protected branches its simple commands target (collected only for owners), at most
@@ -884,8 +1080,9 @@ export async function scanReplay(dir, { since = null, until = null, policy = DEF
             if (seen.get(id)) t.repeated.asks += 1
             continue
           }
-          const cmd = String(b.input?.command ?? '')
-          if (policy.ignore.some((rx) => rx.test(cmd))) {
+          // Never throws: a command that cannot be checked counts as an UNCHECKED ask, not as an unreadable file.
+          const decision = commandDecision(String(b.input?.command ?? ''), policy)
+          if (decision === null) {
             t.ignored += 1
             if (id) seen.set(id, false)
             continue
@@ -895,7 +1092,7 @@ export async function scanReplay(dir, { since = null, until = null, policy = DEF
             if (!t.firstTs || day < t.firstTs) t.firstTs = day
             if (!t.lastTs || day > t.lastTs) t.lastTs = day
           }
-          const { categories: hits, owner } = askDecision(cmd, policy)
+          const { categories: hits, owner } = decision
           for (const h of hits) t.byCategory[h] = (t.byCategory[h] || 0) + 1
           const asked = hits.length > 0
           if (asked) {
@@ -916,6 +1113,7 @@ export async function scanReplay(dir, { since = null, until = null, policy = DEF
       }
     } catch {
       // Unreadable or vanished file: skip it and keep the counts so far. Never rethrow: the message carries the path.
+      // (A command that cannot be checked does not land here: commandDecision never throws.)
       t.unreadable += 1
     }
   }
