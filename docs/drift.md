@@ -37,7 +37,7 @@ node bin/vetobench.js drift test/fixtures/drift-example --since 2026-10-05 --unt
 ```
 
 ```
-vetobench 0.2.0 drift: who approved your agent's actions, week by week
+vetobench 0.3.0 drift: who approved your agent's actions, week by week
 5 weeks · 2026-10-05 to 2026-11-03 (UTC, weeks start on Monday) · 32 recorded decisions · 3 transcripts
 
 Who approved the agent's actions:

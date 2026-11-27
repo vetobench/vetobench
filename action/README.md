@@ -32,12 +32,12 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - uses: vetobench/vetobench/action@COMMIT_SHA # v0.2.0
+      - uses: vetobench/vetobench/action@COMMIT_SHA # v0.3.0
 ```
 
 `timeout-minutes: 5` caps the job: the check takes seconds, and a cap stops a pull request from holding a runner for GitHub's six-hour default.
 
-Replace `COMMIT_SHA` with the full commit SHA of the release tag you choose, as the other two actions are pinned. `git ls-remote https://github.com/vetobench/vetobench 'refs/tags/v0.2.0*'` prints it: take the line that ends in `^{}` if there is one, otherwise the only line. A tag name or a branch would let a later push change the code your CI runs.
+Replace `COMMIT_SHA` with the full commit SHA of the release tag you choose, as the other two actions are pinned. `git ls-remote https://github.com/vetobench/vetobench 'refs/tags/v0.3.0*'` prints it: take the line that ends in `^{}` if there is one, otherwise the only line. A tag name or a branch would let a later push change the code your CI runs.
 
 The action needs Node.js 18 or later on the runner. GitHub-hosted runners ship with one, but `actions/setup-node` keeps the version fixed; the action stops with an error when it finds no Node.js or an older one.
 
@@ -50,7 +50,7 @@ The action needs Node.js 18 or later on the runner. GitHub-hosted runners ship w
 For a repository with several projects, name each file:
 
 ```yaml
-      - uses: vetobench/vetobench/action@COMMIT_SHA # v0.2.0
+      - uses: vetobench/vetobench/action@COMMIT_SHA # v0.3.0
         with:
           files: |
             .claude/settings.json
@@ -66,7 +66,7 @@ Claude Code keeps `settings.local.json` out of git by default, so in CI the defa
 - **Counts only.** The log shows how many files and rules were checked and how many failed each check, never a rule, a path or a secret, so it is safe in a public repository's CI log:
 
 ```
-vetobench 0.2.0 check-settings: 1 settings file(s), 5 allow-rule(s)
+vetobench 0.3.0 check-settings: 1 settings file(s), 5 allow-rule(s)
 
   Rules with a secret inside                             1
   Broad wildcards (python3:*, ssh:*, git:* ...)          1

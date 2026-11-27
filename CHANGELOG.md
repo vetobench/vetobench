@@ -4,7 +4,7 @@ Notable changes to vetobench, newest first. Versions follow [Semantic Versioning
 
 Corrections to published numbers go here as **retractions**: the claim as published, the corrected number, why it was wrong, and the [CLAIMS.md](CLAIMS.md) line it affects. That line stays in CLAIMS.md, marked retracted, so the record stays complete.
 
-## Unreleased
+## 0.3.0 (2026-11-27)
 
 ### Added
 
@@ -15,6 +15,10 @@ Corrections to published numbers go here as **retractions**: the claim as publis
 - `docs/hook.md`: tested how the hook's "ask" meets Claude Code's permissions (Claude Code 2.1.332, headless). A matching allow-rule did not override it, nor did `bypassPermissions`; `dontAsk` turns it into a denial. The interactive dialog itself was not observed. Replaces the "the documentation does not say" caveats.
 - `docs/hook.md`: also tested inside subagents (foreground and background): the hook runs for their shell commands and its ask holds them, as in the main session.
 - README: links to vetobench.com, the methodology page and the claims ledger.
+
+### Changed
+
+- The npm package's homepage is now https://vetobench.com.
 
 ## 0.2.0 (2026-11-25)
 

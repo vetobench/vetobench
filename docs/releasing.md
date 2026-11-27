@@ -22,15 +22,15 @@ The GitHub Action in [`action/`](../action/README.md) needs no publishing step: 
    ```sh
    git switch main
    git pull --ff-only
-   git tag -a v0.2.0 -m "vetobench 0.2.0"
-   git push origin v0.2.0
+   git tag -a v0.3.0 -m "vetobench 0.3.0"
+   git push origin v0.3.0
    ```
 
 3. Watch the `release` run under Actions. If the `npm` environment has protection rules, approve the deployment there.
 
-A tag that does not match `package.json` stops the publish job before anything reaches npm. Delete the tag (`git push origin :refs/tags/v0.2.0` and `git tag -d v0.2.0`), fix `main` through a pull request, and tag again.
+A tag that does not match `package.json` stops the publish job before anything reaches npm. Delete the tag (`git push origin :refs/tags/v0.3.0` and `git tag -d v0.3.0`), fix `main` through a pull request, and tag again.
 
-npm versions are immutable: a published version cannot be replaced, and unpublishing is limited by npm's policy. If a release is wrong, deprecate it with `npm deprecate vetobench@0.2.0 "<reason>"`, release a patch, and record what happened in `CHANGELOG.md`.
+npm versions are immutable: a published version cannot be replaced, and unpublishing is limited by npm's policy. If a release is wrong, deprecate it with `npm deprecate vetobench@0.3.0 "<reason>"`, release a patch, and record what happened in `CHANGELOG.md`.
 
 ## Verify a release
 
@@ -39,7 +39,7 @@ npm versions are immutable: a published version cannot be replaced, and unpublis
 
   ```sh
   npm init -y
-  npm install vetobench@0.2.0
+  npm install vetobench@0.3.0
   npm audit signatures
   ```
 
