@@ -58,7 +58,7 @@ export const MAX_VARS = 256
  * bodies cut out, ignore patterns on the whole command. Longer, rules are left out (incomplete) and ignore patterns
  * skip nothing. A regular expression cannot be stopped once it runs, and a simple one can still take a long time on a
  * long run of blanks or of `NAME=value;`. */
-export const MAX_PATTERN_TEXT = 64 * 1024
+export const MAX_PATTERN_TEXT = 32 * 1024
 
 /** Thrown when a command line goes past a limit that could hide a command from the detectors. */
 class ParseLimit extends Error {}
