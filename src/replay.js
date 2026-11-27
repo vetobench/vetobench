@@ -589,10 +589,14 @@ const OWNER_LABEL_TEXT = '1 to 40 characters: letters, digits, spaces (not at ei
 export const MAX_OWNER_COMMAND = 4096
 /** A host or branch longer than this (a DNS name has at most 253), or on more than one line, is not compared. */
 const MAX_OWNER_TARGET = 255
-/** At most this many owners entries; per entry, at most this many host and branch patterns together, each with at
- * most this many `*`, and at most this many contains strings of at most this many characters. */
+/** At most this many distinct hosts, and as many distinct branches, of one command are compared (the first ones its
+ * asked parts name); further ones are not. */
+export const MAX_OWNER_DISTINCT = 32
+/** At most this many owners entries; per entry, at most this many host and branch patterns together, each of at most
+ * this many characters with at most this many `*`, and at most this many contains strings of at most this many characters. */
 export const MAX_OWNERS = 64
 const MAX_OWNER_PATTERNS = 16
+const MAX_OWNER_PATTERN_LENGTH = 64
 const MAX_OWNER_STARS = 2
 const MAX_CONTAINS = 8
 const MAX_CONTAINS_LENGTH = 64
@@ -604,7 +608,9 @@ const comparable = (t) => t.length <= MAX_OWNER_TARGET && !LINE_BREAKS.some((c) 
 /**
  * A `*` glob as a function, without a regular expression: the text before the first `*` must start the value, the text
  * after the last must end it, and each part between must follow in order (the leftmost fit is always the right one).
- * Linear in the value. Same answers as globRx(pattern) for a comparable value; ignoreCase compares in lowercase.
+ * Linear in the value. ignoreCase compares both in lowercase. For a comparable value it gives globRx's answers on ASCII;
+ * for a few Unicode letter variants (µ and μ, ς and σ, and the like), which the `i` flag folds together and lowercase
+ * keeps apart, it is stricter, so an owner label can be missing where prodHosts matches.
  */
 function globMatcher(pattern, ignoreCase) {
   const parts = (ignoreCase ? pattern.toLowerCase() : pattern).split('*')
@@ -676,6 +682,9 @@ function compileOwners(raw, names) {
     const branches = list('branches')
     for (const [k, v] of [['hosts', hosts], ['branches', branches]]) {
       if (v?.some((x) => x.split('*').length - 1 > MAX_OWNER_STARS)) throw new Error(`policy: ${at}.${k} patterns may hold at most ${MAX_OWNER_STARS} *`)
+      if (v?.some((x) => x.length > MAX_OWNER_PATTERN_LENGTH)) {
+        throw new Error(`policy: ${at}.${k} patterns may be at most ${MAX_OWNER_PATTERN_LENGTH} characters long`)
+      }
     }
     if ((hosts?.length ?? 0) + (branches?.length ?? 0) > MAX_OWNER_PATTERNS) {
       throw new Error(`policy: ${at} may hold at most ${MAX_OWNER_PATTERNS} host and branch patterns together`)
@@ -796,16 +805,20 @@ function ownerOf(owners, categories, found, text) {
 export function askDecision(command, policy = DEFAULT_POLICY) {
   const { text, segs } = parseCommand(command)
   const owners = String(command ?? '').length <= MAX_OWNER_COMMAND ? policy.owners ?? [] : []
-  // Per category hit: the hosts and protected branches its simple commands target (collected only for owners).
+  // Per category hit: the hosts and protected branches its simple commands target (collected only for owners), at most
+  // MAX_OWNER_DISTINCT distinct ones of each for the whole command, in the order the detectors meet them.
   const found = new Map()
   const at = (k) => found.get(k) ?? found.set(k, { hosts: new Set(), branches: new Set() }).get(k)
+  const seenHosts = new Set()
+  const seenBranches = new Set()
+  const keep = (seen, v) => seen.has(v) || (seen.size < MAX_OWNER_DISTINCT && Boolean(seen.add(v)))
   for (const [name, test] of policy.detectors) {
     for (const s of segs) {
       if (!test(s, policy)) continue
       const f = at(name)
       if (!owners.length) break
-      for (const h of askHosts(name, s, policy)) f.hosts.add(h)
-      if (name === 'push-to-main') for (const b of protectedPushes(s, policy)) if (comparable(b)) f.branches.add(b)
+      for (const h of askHosts(name, s, policy)) if (keep(seenHosts, h)) f.hosts.add(h)
+      if (name === 'push-to-main') for (const b of protectedPushes(s, policy)) if (comparable(b) && keep(seenBranches, b)) f.branches.add(b)
     }
   }
   for (const r of policy.rules) if (r.rx.test(text)) at(r.category)

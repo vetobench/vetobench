@@ -52,6 +52,8 @@ test('owners: labels are short names; every bad entry is an error naming the fie
     [{ owners: [{ owner: 'x', categories: [''] }] }, /owners\[0\]\.categories must be a non-empty list/],
     [{ owners: [{ owner: 'x', hosts: ['*hunter2*a*'] }] }, /^policy: owners\[0\]\.hosts patterns may hold at most 2 \*$/],
     [{ owners: [{ owner: 'x', branches: ['*/*/*'] }] }, /owners\[0\]\.branches patterns may hold at most 2 \*/],
+    [{ owners: [{ owner: 'x', hosts: ['hunter2' + 'a'.repeat(58)] }] }, /^policy: owners\[0\]\.hosts patterns may be at most 64 characters long$/],
+    [{ owners: [{ owner: 'x', branches: ['release/' + 'hunter2'.repeat(9)] }] }, /owners\[0\]\.branches patterns may be at most 64 characters long/],
     [{ owners: [{ owner: 'x', hosts: Array(9).fill('hunter2'), branches: Array(8).fill('main') }] },
       /owners\[0\] may hold at most 16 host and branch patterns together/],
     [{ owners: Array.from({ length: 65 }, () => ({ owner: 'x', categories: ['custom'] })) }, /^policy: owners may have at most 64 entries$/],
@@ -249,34 +251,47 @@ test('owners take no regular expression: the rules\' spellings are an error for 
     'other errors still fail')
 })
 
-test('owners: with every limit at its maximum, crafted commands get their answer well under a second', async () => {
+test('owners: with every limit at its maximum, the work per command is bounded, crafted commands included', async () => {
   const a = (n) => 'a'.repeat(n)
-  // Near misses: each holds a letter the crafted values never do, placed so the prefix and suffix checks pass and the
-  // search fails late. No entry matches, so every entry is tried on every command.
-  const globs = [`*q${a(100)}*`, `*${a(100)}q*`, `a*r${a(120)}*`, `*${a(100)}*s${a(100)}`, `a${a(50)}*t${a(150)}*`, '*a*q', `*${a(60)}*x${a(60)}`,
-    `*u${a(200)}*`, `*${a(110)}v*${a(110)}`, `${a(120)}*${a(120)}x`, `*${a(239)}w*`, `*y${a(239)}*`, `*${a(80)}*${a(80)}y`, `*z${a(150)}*`,
-    `${a(10)}*q${a(200)}*`, `*${a(120)}*${a(100)}`]
+  // Near misses of at most 64 characters: each holds a letter the crafted values never do, placed so the prefix and
+  // suffix checks pass and the search fails late (the reviewer's shape first: an absent letter, then a long common tail).
+  const globs = [`*ab${a(60)}*`, `*b${a(61)}*`, `*${a(61)}b*`, `a*b${a(60)}*`, `*${a(30)}*b${a(30)}`, `*${a(62)}q`, `${a(31)}*${a(30)}q`,
+    `*q${a(61)}*`, `*${a(40)}*x${a(20)}`, `a${a(20)}*t${a(40)}*`, '*a*q', `*${a(31)}v*${a(30)}`, `*y${a(61)}*`, `*${a(30)}*${a(30)}y`,
+    `*z${a(61)}*`, `*ab${a(30)}*${a(29)}`]
   const contains = ['\n'.repeat(63) + 'x', ' '.repeat(63) + 'x', ';'.repeat(63) + 'x', a(63) + 'x', 'x' + a(63), '\n'.repeat(32) + ' git push x',
     'b' + a(63), a(32) + 'b' + a(31)]
-  const owners = Array.from({ length: 64 }, (_, i) => [{ owner: `team ${i}`, hosts: globs }, { owner: `team ${i}`, branches: globs },
-    { owner: `team ${i}`, contains }, { owner: `team ${i}`, contains: contains.slice().reverse() }][i % 4])
-  const policy = { branches: ['*'], owners }
-  assert.equal(compilePolicy(policy).owners.length, 64)
-  const H = a(240)
+  // All 64 entries of one kind, so that none is skipped: no entry matches, and every one is tried on every command.
+  const all = (sel) => Array.from({ length: 64 }, (_, i) => ({ owner: `team ${i}`, ...sel }))
+  const policies = [{ branches: ['*'], owners: all({ branches: globs }) }, { owners: all({ hosts: globs }) },
+    { branches: ['*'], owners: all({ contains }) }]
+  for (const p of policies) assert.equal(compilePolicy(p).owners.length, 64)
+  // Hundreds of distinct 251-character branches and 243-character hosts, made by expanding a variable.
+  const tokens = ['.', ',', '-', '+', '=', '@', '%', '^', '~'].flatMap((p) => Array.from({ length: 100 }, (_, i) => `${p}${String(i).padStart(2, '0')}`))
+  const fit = (head, parts) => parts.reduce((s, t) => ((s + t).length <= MAX_OWNER_COMMAND ? s + t : s), head)
   const commands = [
     '\n'.repeat(4070) + ' git push origin main', ';'.repeat(4070) + ' git push origin main', ' '.repeat(4070) + 'git push origin main',
     a(4070) + '; git push origin main', ('A=b ' + a(30) + '; ').repeat(100) + 'git push origin main',
-    // Hundreds of distinct 242-character hosts and branches, made by expanding a variable.
-    `H=${H}; ` + Array.from({ length: 150 }, (_, i) => `ssh \${H}${i} 'sudo rm -rf x'`).join('; '),
-    `B=${H}; git push origin ` + Array.from({ length: 560 }, (_, i) => `\${B}${i}`).join(' '),
-  ].map((c) => c.slice(0, MAX_OWNER_COMMAND))
+    fit(`A=${a(250)}; git push o`, tokens.map((t) => ` $A${t}`)), fit(`H=${a(240)}; `, tokens.map((t) => `ssh $H${t} rm -rf x; `)),
+  ]
+  assert.ok(commands.every((c) => c.length <= MAX_OWNER_COMMAND))
   let worst = 0
-  for (const command of commands) {
-    const [took, out] = await timedHook(policy, command)
-    assert.ok(out.startsWith('{"hookSpecificOutput"') && !out.includes('owner:'), out)
-    worst = Math.max(worst, took)
+  for (const policy of policies) {
+    for (const command of commands) {
+      const [took, out] = await timedHook(policy, command)
+      assert.ok(!out.includes('owner:'), out)
+      worst = Math.max(worst, took)
+    }
   }
-  assert.ok(worst < 2000, `${worst.toFixed(0)} ms`)
+  assert.ok(worst < 1000, `${worst.toFixed(0)} ms`)
+
+  // Only the first 32 distinct hosts, and 32 distinct branches, of a command are compared; a repeated one counts once.
+  const hosts = Array.from({ length: 33 }, (_, i) => `ssh h${i}.example 'sudo rm -rf x'`).join('; ')
+  assert.equal(owner(hosts, compilePolicy({ owners: [{ owner: 'x', hosts: ['h31.example'] }] })), 'x')
+  assert.equal(owner(hosts, compilePolicy({ owners: [{ owner: 'x', hosts: ['h32.example'] }] })), null)
+  assert.equal(owner(`ssh h0.example 'sudo rm -rf x'; ${hosts}`, compilePolicy({ owners: [{ owner: 'x', hosts: ['h31.example'] }] })), 'x')
+  const pushes = 'git push origin ' + Array.from({ length: 33 }, (_, i) => `b${i}`).join(' ')
+  assert.equal(owner(pushes, compilePolicy({ branches: ['b*'], owners: [{ owner: 'y', branches: ['b31'] }] })), 'y')
+  assert.equal(owner(pushes, compilePolicy({ branches: ['b*'], owners: [{ owner: 'y', branches: ['b32'] }] })), null)
 
   // Over the cap, no owner is looked up, however the entries would match.
   const any = compilePolicy({ owners: [{ owner: 'release manager', categories: ['push-to-main'] }] })
